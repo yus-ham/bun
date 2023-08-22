@@ -5171,6 +5171,9 @@ pub fn NewServer(comptime NamespaceType: type, comptime ssl_enabled_: bool, comp
 
             if (error_instance == .zero) {
                 error_instance = ZigString.init(std.fmt.bufPrint(&output_buf, "Failed to start server. Is port {d} in use?", .{this.config.port}) catch "Failed to start server").toErrorInstance(this.globalThis);
+                error_instance.put(this.globalThis, ZigString.static("code"), JSC.ZigString.init("EADDRINUSE").toValueGC(globalObject));
+                error_instance.put(this.globalThis, ZigString.static("address"), this.config.hostname.toValueGC(globalObject));
+                error_instance.put(this.globalThis, ZigString.static("port"), this.config.port.toValueGC(globalObject));
             }
 
             // store the exception in here
