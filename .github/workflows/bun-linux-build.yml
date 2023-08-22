@@ -33,8 +33,8 @@ on:
 
 jobs:
   linux:
-    name: ${{matrix.tag}}
-    runs-on: ${{matrix.runner}}
+    name: test2
+    runs-on: ubuntu-latest
     timeout-minutes: 90
     strategy:
       fail-fast: false
@@ -152,7 +152,7 @@ jobs:
           artifacts: "${{runner.temp}}/release/bun-${{matrix.tag}}.zip,${{runner.temp}}/release/bun-${{matrix.tag}}-profile.zip"
 
   linux-test:
-    name: Tests ${{matrix.tag}}
+    name: Tests 3
     runs-on: ubuntu-latest
     needs: [linux]
     if: github.event_name == 'pull_request'
