@@ -20,21 +20,21 @@ pub fn main() anyerror!void {
     Output.Source.set(&output_source);
     defer Output.flush();
 
-    var args_buffer: [8096 * 2]u8 = undefined;
+    var args_buffer: [8192 * 2]u8 = undefined;
     var fixed_buffer = std.heap.FixedBufferAllocator.init(&args_buffer);
     var allocator = fixed_buffer.allocator();
 
     var args = std.mem.bytesAsSlice([]u8, try std.process.argsAlloc(allocator));
 
     const to_resolve = args[args.len - 1];
-    const cwd = try std.process.getCwdAlloc(allocator);
+    const cwd = try bun.getcwdAlloc(allocator);
     var path: []u8 = undefined;
-    var out_buffer: [bun.MAX_PATH_BYTES]u8 = undefined;
+    var out_buffer: bun.PathBuffer = undefined;
 
     var j: usize = 0;
     while (j < 1000) : (j += 1) {
         var parts = [1][]const u8{to_resolve};
-        var joined_buf: [bun.MAX_PATH_BYTES]u8 = undefined;
+        var joined_buf: bun.PathBuffer = undefined;
         var joined = path_handler.joinAbsStringBuf(
             cwd,
             &joined_buf,

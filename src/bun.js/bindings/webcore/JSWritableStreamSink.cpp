@@ -122,7 +122,9 @@ void JSWritableStreamSink::finishCreation(VM& vm)
 
 JSObject* JSWritableStreamSink::createPrototype(VM& vm, JSDOMGlobalObject& globalObject)
 {
-    return JSWritableStreamSinkPrototype::create(vm, &globalObject, JSWritableStreamSinkPrototype::createStructure(vm, &globalObject, globalObject.objectPrototype()));
+    auto* structure = JSWritableStreamSinkPrototype::createStructure(vm, &globalObject, globalObject.objectPrototype());
+    structure->setMayBePrototype(true);
+    return JSWritableStreamSinkPrototype::create(vm, &globalObject, structure);
 }
 
 JSObject* JSWritableStreamSink::prototype(VM& vm, JSDOMGlobalObject& globalObject)
@@ -213,7 +215,7 @@ void JSWritableStreamSink::analyzeHeap(JSCell* cell, HeapAnalyzer& analyzer)
     Base::analyzeHeap(cell, analyzer);
 }
 
-bool JSWritableStreamSinkOwner::isReachableFromOpaqueRoots(JSC::Handle<JSC::Unknown> handle, void*, AbstractSlotVisitor& visitor, const char** reason)
+bool JSWritableStreamSinkOwner::isReachableFromOpaqueRoots(JSC::Handle<JSC::Unknown> handle, void*, AbstractSlotVisitor& visitor, ASCIILiteral* reason)
 {
     UNUSED_PARAM(handle);
     UNUSED_PARAM(visitor);

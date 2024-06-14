@@ -36,7 +36,7 @@ pub const CodeCoverageReport = struct {
     };
 
     pub fn linesCoverageFraction(this: *const CodeCoverageReport) f64 {
-        var intersected = this.executable_lines.clone(bun.default_allocator) catch @panic("OOM");
+        var intersected = this.executable_lines.clone(bun.default_allocator) catch bun.outOfMemory();
         defer intersected.deinit(bun.default_allocator);
         intersected.setIntersection(this.lines_which_have_executed);
 
@@ -133,7 +133,7 @@ pub const CodeCoverageReport = struct {
         writer: anytype,
         comptime enable_colors: bool,
     ) !void {
-        var failing = fraction.*;
+        const failing = fraction.*;
         const fns = report.functionCoverageFraction();
         const lines = report.linesCoverageFraction();
         const stmts = report.stmtsCoverageFraction();
@@ -162,7 +162,7 @@ pub const CodeCoverageReport = struct {
 
         try writer.writeAll(comptime prettyFmt("<r><d> | <r>", enable_colors));
 
-        var executable_lines_that_havent_been_executed = report.lines_which_have_executed.clone(bun.default_allocator) catch @panic("OOM");
+        var executable_lines_that_havent_been_executed = report.lines_which_have_executed.clone(bun.default_allocator) catch bun.outOfMemory();
         defer executable_lines_that_havent_been_executed.deinit(bun.default_allocator);
         executable_lines_that_havent_been_executed.toggleAll();
 
@@ -277,7 +277,7 @@ pub const CodeCoverageReport = struct {
         ignore_sourcemap_: bool,
     ) ?CodeCoverageReport {
         bun.JSC.markBinding(@src());
-        var vm = globalThis.vm();
+        const vm = globalThis.vm();
 
         var result: ?CodeCoverageReport = null;
 
@@ -326,13 +326,13 @@ pub const ByteRangeMapping = struct {
     pub threadlocal var map: ?*HashMap = null;
     pub fn generate(str: bun.String, source_contents_str: bun.String, source_id: i32) callconv(.C) void {
         var _map = map orelse brk: {
-            map = bun.JSC.VirtualMachine.get().allocator.create(HashMap) catch @panic("OOM");
+            map = bun.JSC.VirtualMachine.get().allocator.create(HashMap) catch bun.outOfMemory();
             map.?.* = HashMap.init(bun.JSC.VirtualMachine.get().allocator);
             break :brk map.?;
         };
         var slice = str.toUTF8(bun.default_allocator);
         const hash = bun.hash(slice.slice());
-        var entry = _map.getOrPut(hash) catch @panic("Out of memory");
+        var entry = _map.getOrPut(hash) catch bun.outOfMemory();
         if (entry.found_existing) {
             entry.value_ptr.deinit();
         }
@@ -353,7 +353,7 @@ pub const ByteRangeMapping = struct {
 
         var map_ = map orelse return null;
         const hash = bun.hash(slice.slice());
-        var entry = map_.getPtr(hash) orelse return null;
+        const entry = map_.getPtr(hash) orelse return null;
         return entry;
     }
 
@@ -365,13 +365,11 @@ pub const ByteRangeMapping = struct {
         function_blocks: []const BasicBlockRange,
         ignore_sourcemap: bool,
     ) !CodeCoverageReport {
-        var line_starts = this.line_offset_table.items(.byte_offset_to_start_of_line);
+        const line_starts = this.line_offset_table.items(.byte_offset_to_start_of_line);
 
         var executable_lines: Bitset = Bitset{};
         var lines_which_have_executed: Bitset = Bitset{};
-        const parsed_mappings_ = bun.JSC.VirtualMachine.get().source_mappings.get(
-            source_url.slice(),
-        );
+        const parsed_mappings_ = bun.JSC.VirtualMachine.get().source_mappings.get(source_url.slice());
 
         var functions = std.ArrayListUnmanaged(CodeCoverageReport.Block){};
         try functions.ensureTotalCapacityPrecise(allocator, function_blocks.len);
@@ -394,6 +392,8 @@ pub const ByteRangeMapping = struct {
             executable_lines = try Bitset.initEmpty(allocator, line_count);
             lines_which_have_executed = try Bitset.initEmpty(allocator, line_count);
             for (blocks, 0..) |block, i| {
+                if (block.endOffset < 0 or block.startOffset < 0) continue; // does not map to anything
+
                 const min: usize = @intCast(@min(block.startOffset, block.endOffset));
                 const max: usize = @intCast(@max(block.startOffset, block.endOffset));
                 var min_line: u32 = std.math.maxInt(u32);
@@ -412,9 +412,9 @@ pub const ByteRangeMapping = struct {
                     min_line = @min(min_line, line);
                     max_line = @max(max_line, line);
 
-                    executable_lines.set(@intCast(new_line_index));
+                    executable_lines.set(line);
                     if (has_executed) {
-                        lines_which_have_executed.set(@intCast(new_line_index));
+                        lines_which_have_executed.set(line);
                     }
                 }
 
@@ -430,6 +430,8 @@ pub const ByteRangeMapping = struct {
             }
 
             for (function_blocks, 0..) |function, i| {
+                if (function.endOffset < 0 or function.startOffset < 0) continue; // does not map to anything
+
                 const min: usize = @intCast(@min(function.startOffset, function.endOffset));
                 const max: usize = @intCast(@max(function.startOffset, function.endOffset));
                 var min_line: u32 = std.math.maxInt(u32);
@@ -473,6 +475,8 @@ pub const ByteRangeMapping = struct {
             lines_which_have_executed = try Bitset.initEmpty(allocator, line_count);
 
             for (blocks, 0..) |block, i| {
+                if (block.endOffset < 0 or block.startOffset < 0) continue; // does not map to anything
+
                 const min: usize = @intCast(@min(block.startOffset, block.endOffset));
                 const max: usize = @intCast(@max(block.startOffset, block.endOffset));
                 var min_line: u32 = std.math.maxInt(u32);
@@ -514,6 +518,8 @@ pub const ByteRangeMapping = struct {
             }
 
             for (function_blocks, 0..) |function, i| {
+                if (function.endOffset < 0 or function.startOffset < 0) continue; // does not map to anything
+
                 const min: usize = @intCast(@min(function.startOffset, function.endOffset));
                 const max: usize = @intCast(@max(function.startOffset, function.endOffset));
                 var min_line: u32 = std.math.maxInt(u32);
@@ -617,7 +623,7 @@ pub const ByteRangeMapping = struct {
             return .zero;
         };
 
-        var str = bun.String.create(mutable_str.toOwnedSliceLeaky());
+        var str = bun.String.createUTF8(mutable_str.toOwnedSliceLeaky());
         defer str.deref();
         return str.toJS(globalThis);
     }

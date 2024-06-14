@@ -1,4 +1,5 @@
 const std = @import("std");
+const bun = @import("root").bun;
 
 pub const Reader = struct {
     const Self = @This();
@@ -22,7 +23,7 @@ pub const Reader = struct {
             return error.EOF;
         }
 
-        var slice = this.remain[0..read_count];
+        const slice = this.remain[0..read_count];
 
         this.remain = this.remain[read_count..];
 
@@ -30,7 +31,7 @@ pub const Reader = struct {
     }
 
     pub inline fn readAs(this: *Self, comptime T: type) !T {
-        if (!std.meta.trait.hasUniqueRepresentation(T)) {
+        if (!std.meta.hasUniqueRepresentation(T)) {
             @compileError(@typeName(T) ++ " must have unique representation.");
         }
 
@@ -72,11 +73,8 @@ pub const Reader = struct {
                 return std.mem.readIntSliceNative(T, this.read(length * @sizeOf(T)));
             },
             [:0]const u8, []const u8 => {
-                var i: u32 = 0;
-                var array = try this.allocator.alloc(T, length);
-                while (i < length) : (i += 1) {
-                    array[i] = try this.readArray(u8);
-                }
+                const array = try this.allocator.alloc(T, length);
+                for (array) |*a| a.* = try this.readArray(u8);
                 return array;
             },
             else => {
@@ -85,7 +83,7 @@ pub const Reader = struct {
                         switch (Struct.layout) {
                             .Packed => {
                                 const sizeof = @sizeOf(T);
-                                var slice = try this.read(sizeof * length);
+                                const slice = try this.read(sizeof * length);
                                 return std.mem.bytesAsSlice(T, slice);
                             },
                             else => {},
@@ -98,12 +96,8 @@ pub const Reader = struct {
                     else => {},
                 }
 
-                var i: u32 = 0;
-                var array = try this.allocator.alloc(T, length);
-                while (i < length) : (i += 1) {
-                    array[i] = try this.readValue(T);
-                }
-
+                const array = try this.allocator.alloc(T, length);
+                for (array) |*v| v.* = try this.readValue(T);
                 return array;
             },
         }
@@ -119,7 +113,7 @@ pub const Reader = struct {
     }
 
     pub inline fn readInt(this: *Self, comptime T: type) !T {
-        var slice = try this.read(@sizeOf(T));
+        const slice = try this.read(@sizeOf(T));
 
         return std.mem.readIntSliceNative(T, slice);
     }
@@ -332,44 +326,20 @@ pub const FileWriter = Writer(std.fs.File);
 pub const Api = struct {
     pub const Loader = enum(u8) {
         _none,
-        /// jsx
         jsx,
-
-        /// js
         js,
-
-        /// ts
         ts,
-
-        /// tsx
         tsx,
-
-        /// css
         css,
-
-        /// file
         file,
-
-        /// json
         json,
-
-        /// toml
         toml,
-
-        /// wasm
         wasm,
-
-        /// napi
         napi,
-
-        /// base64
         base64,
-
-        /// dataurl
         dataurl,
-
-        /// text
         text,
+        sqlite,
 
         _,
 
@@ -454,56 +424,7 @@ pub const Api = struct {
         }
     };
 
-    pub const StackFramePosition = packed struct {
-        /// source_offset
-        source_offset: i32 = 0,
-
-        /// line
-        line: i32 = 0,
-
-        /// line_start
-        line_start: i32 = 0,
-
-        /// line_stop
-        line_stop: i32 = 0,
-
-        /// column_start
-        column_start: i32 = 0,
-
-        /// column_stop
-        column_stop: i32 = 0,
-
-        /// expression_start
-        expression_start: i32 = 0,
-
-        /// expression_stop
-        expression_stop: i32 = 0,
-
-        pub fn decode(reader: anytype) anyerror!StackFramePosition {
-            var this = std.mem.zeroes(StackFramePosition);
-
-            this.source_offset = try reader.readValue(i32);
-            this.line = try reader.readValue(i32);
-            this.line_start = try reader.readValue(i32);
-            this.line_stop = try reader.readValue(i32);
-            this.column_start = try reader.readValue(i32);
-            this.column_stop = try reader.readValue(i32);
-            this.expression_start = try reader.readValue(i32);
-            this.expression_stop = try reader.readValue(i32);
-            return this;
-        }
-
-        pub fn encode(this: *const @This(), writer: anytype) anyerror!void {
-            try writer.writeInt(this.source_offset);
-            try writer.writeInt(this.line);
-            try writer.writeInt(this.line_start);
-            try writer.writeInt(this.line_stop);
-            try writer.writeInt(this.column_start);
-            try writer.writeInt(this.column_stop);
-            try writer.writeInt(this.expression_start);
-            try writer.writeInt(this.expression_stop);
-        }
-    };
+    pub const StackFramePosition = bun.JSC.ZigStackFramePosition;
 
     pub const SourceLine = struct {
         /// line
@@ -1244,6 +1165,9 @@ pub const Api = struct {
         /// load_all
         load_all,
 
+        /// load_all_without_inlining
+        load_all_without_inlining,
+
         _,
 
         pub fn jsonStringify(self: @This(), writer: anytype) !void {
@@ -1729,6 +1653,9 @@ pub const Api = struct {
         /// serve
         serve: ?bool = null,
 
+        /// env_files
+        env_files: []const []const u8,
+
         /// extension_order
         extension_order: []const []const u8,
 
@@ -1752,6 +1679,9 @@ pub const Api = struct {
 
         /// source_map
         source_map: ?SourceMapMode = null,
+
+        /// conditions
+        conditions: []const []const u8,
 
         pub fn decode(reader: anytype) anyerror!TransformOptions {
             var this = std.mem.zeroes(TransformOptions);
@@ -1811,28 +1741,34 @@ pub const Api = struct {
                         this.serve = try reader.readValue(bool);
                     },
                     17 => {
-                        this.extension_order = try reader.readArray([]const u8);
+                        this.env_files = try reader.readArray([]const u8);
                     },
                     18 => {
-                        this.framework = try reader.readValue(FrameworkConfig);
+                        this.extension_order = try reader.readArray([]const u8);
                     },
                     19 => {
-                        this.router = try reader.readValue(RouteConfig);
+                        this.framework = try reader.readValue(FrameworkConfig);
                     },
                     20 => {
-                        this.no_summary = try reader.readValue(bool);
+                        this.router = try reader.readValue(RouteConfig);
                     },
                     21 => {
-                        this.disable_hmr = try reader.readValue(bool);
+                        this.no_summary = try reader.readValue(bool);
                     },
                     22 => {
-                        this.port = try reader.readValue(u16);
+                        this.disable_hmr = try reader.readValue(bool);
                     },
                     23 => {
-                        this.log_level = try reader.readValue(MessageLevel);
+                        this.port = try reader.readValue(u16);
                     },
                     24 => {
+                        this.log_level = try reader.readValue(MessageLevel);
+                    },
+                    25 => {
                         this.source_map = try reader.readValue(SourceMapMode);
+                    },
+                    26 => {
+                        this.conditions = try reader.readArray([]const u8);
                     },
                     else => {
                         return error.InvalidMessage;
@@ -1907,38 +1843,48 @@ pub const Api = struct {
                 try writer.writeFieldID(16);
                 try writer.writeInt(@as(u8, @intFromBool(serve)));
             }
-            if (this.extension_order) |extension_order| {
+            if (this.env_files) |env_files| {
                 try writer.writeFieldID(17);
+                try writer.writeArray([]const u8, env_files);
+            }
+            if (this.extension_order) |extension_order| {
+                try writer.writeFieldID(18);
                 try writer.writeArray([]const u8, extension_order);
             }
             if (this.framework) |framework| {
-                try writer.writeFieldID(18);
+                try writer.writeFieldID(19);
                 try writer.writeValue(@TypeOf(framework), framework);
             }
             if (this.router) |router| {
-                try writer.writeFieldID(19);
+                try writer.writeFieldID(20);
                 try writer.writeValue(@TypeOf(router), router);
             }
             if (this.no_summary) |no_summary| {
-                try writer.writeFieldID(20);
+                try writer.writeFieldID(21);
                 try writer.writeInt(@as(u8, @intFromBool(no_summary)));
             }
             if (this.disable_hmr) |disable_hmr| {
-                try writer.writeFieldID(21);
+                try writer.writeFieldID(22);
                 try writer.writeInt(@as(u8, @intFromBool(disable_hmr)));
             }
             if (this.port) |port| {
-                try writer.writeFieldID(22);
+                try writer.writeFieldID(23);
                 try writer.writeInt(port);
             }
             if (this.log_level) |log_level| {
-                try writer.writeFieldID(23);
+                try writer.writeFieldID(24);
                 try writer.writeEnum(log_level);
             }
             if (this.source_map) |source_map| {
-                try writer.writeFieldID(24);
+                try writer.writeFieldID(25);
                 try writer.writeEnum(source_map);
             }
+
+            if (this.conditions) |conditions| {
+                try writer.writeFieldID(26);
+                try writer.writeArray([]const u8, conditions);
+            }
+
             try writer.endMessage();
         }
     };
@@ -2882,6 +2828,9 @@ pub const Api = struct {
         /// exact
         exact: ?bool = null,
 
+        /// concurrent_scripts
+        concurrent_scripts: ?u32 = null,
+
         pub fn decode(reader: anytype) anyerror!BunInstall {
             var this = std.mem.zeroes(BunInstall);
 
@@ -2950,6 +2899,9 @@ pub const Api = struct {
                     },
                     20 => {
                         this.exact = try reader.readValue(bool);
+                    },
+                    21 => {
+                        this.concurrent_scripts = try reader.readValue(u32);
                     },
                     else => {
                         return error.InvalidMessage;
@@ -3039,6 +2991,10 @@ pub const Api = struct {
             if (this.exact) |exact| {
                 try writer.writeFieldID(20);
                 try writer.writeInt(@as(u8, @intFromBool(exact)));
+            }
+            if (this.concurrent_scripts) |concurrent_scripts| {
+                try writer.writeFieldID(21);
+                try writer.writeInt(concurrent_scripts);
             }
             try writer.endMessage();
         }

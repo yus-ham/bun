@@ -18,6 +18,7 @@
 #include "libusockets.h"
 #include "internal/internal.h"
 #include <stdlib.h>
+#include <time.h>
 
 #if defined(LIBUS_USE_EPOLL) || defined(LIBUS_USE_KQUEUE)
 
@@ -28,15 +29,17 @@ void Bun__internal_dispatch_ready_poll(void* loop, void* poll);
 /* Cannot include this one on Windows */
 #include <unistd.h>
 #include <stdint.h>
+#include <errno.h>
+#include <string.h> // memset
 #endif
 
-void us_loop_run_bun_tick(struct us_loop_t *loop, int64_t timeoutMs, void*);
+void us_loop_run_bun_tick(struct us_loop_t *loop, const struct timespec* timeout);
 
 /* Pointer tags are used to indicate a Bun pointer versus a uSockets pointer */
 #define UNSET_BITS_49_UNTIL_64 0x0000FFFFFFFFFFFF
 #define CLEAR_POINTER_TAG(p) ((void *) ((uintptr_t) (p) & UNSET_BITS_49_UNTIL_64))
-#define LIKELY(cond) __builtin_expect((uint64_t)(void*)(cond), 1)
-#define UNLIKELY(cond) __builtin_expect((uint64_t)(void*)(cond), 0)
+#define LIKELY(cond) __builtin_expect((_Bool)(cond), 1)
+#define UNLIKELY(cond) __builtin_expect((_Bool)(cond), 0)
 
 #ifdef LIBUS_USE_EPOLL
 #define GET_READY_POLL(loop, index) (struct us_poll_t *) loop->ready_polls[index].data.ptr
@@ -87,12 +90,12 @@ LIBUS_SOCKET_DESCRIPTOR us_poll_fd(struct us_poll_t *p) {
 
 /* Returns any of listen socket, socket, shut down socket or callback */
 int us_internal_poll_type(struct us_poll_t *p) {
-    return p->state.poll_type & 3;
+    return p->state.poll_type & POLL_TYPE_KIND_MASK;
 }
 
 /* Bug: doesn't really SET, rather read and change, so needs to be inited first! */
 void us_internal_poll_set_type(struct us_poll_t *p, int poll_type) {
-    p->state.poll_type = poll_type | (p->state.poll_type & 12);
+    p->state.poll_type = poll_type | (p->state.poll_type & POLL_TYPE_POLLING_MASK);
 }
 
 /* Timer */
@@ -108,7 +111,7 @@ struct us_loop_t *us_timer_loop(struct us_timer_t *t) {
 
 /* Loop */
 struct us_loop_t *us_create_loop(void *hint, void (*wakeup_cb)(struct us_loop_t *loop), void (*pre_cb)(struct us_loop_t *loop), void (*post_cb)(struct us_loop_t *loop), unsigned int ext_size) {
-    struct us_loop_t *loop = (struct us_loop_t *) us_malloc(sizeof(struct us_loop_t) + ext_size);
+    struct us_loop_t *loop = (struct us_loop_t *) us_calloc(1, sizeof(struct us_loop_t) + ext_size);
     loop->num_polls = 0;
     /* These could be accessed if we close a poll before starting the loop */
     loop->num_ready_polls = 0;
@@ -152,14 +155,20 @@ void us_loop_run(struct us_loop_t *loop) {
                 }
 #ifdef LIBUS_USE_EPOLL
                 int events = loop->ready_polls[loop->current_ready_poll].events;
-                int error = loop->ready_polls[loop->current_ready_poll].events & (EPOLLERR | EPOLLHUP);
+                const int error = events & (EPOLLERR | EPOLLHUP);
 #else
-                /* EVFILT_READ, EVFILT_TIME, EVFILT_USER are all mapped to LIBUS_SOCKET_READABLE */
-                int events = LIBUS_SOCKET_READABLE;
-                if (loop->ready_polls[loop->current_ready_poll].filter == EVFILT_WRITE) {
-                    events = LIBUS_SOCKET_WRITABLE;
-                }
-                int error = loop->ready_polls[loop->current_ready_poll].flags & (EV_ERROR | EV_EOF);
+                const struct kevent64_s* current_kevent = &loop->ready_polls[loop->current_ready_poll];
+                const int16_t filter = current_kevent->filter;
+                const uint16_t flags = current_kevent->flags;
+                const uint32_t fflags = current_kevent->fflags;
+
+                // > Multiple events which trigger the filter do not result in multiple kevents being placed on the kqueue
+                // > Instead, the filter will aggregate the events into a single kevent struct
+                // Note: EV_ERROR only sets the error in data as part of changelist. Not in this call!
+                int events = 0
+                    | ((filter & EVFILT_READ) ? LIBUS_SOCKET_READABLE : 0)
+                    | ((filter & EVFILT_WRITE) ? LIBUS_SOCKET_WRITABLE : 0);
+                const int error = (flags & (EV_ERROR | EV_EOF)) ? ((int)fflags || 1) : 0;
 #endif
                 /* Always filter all polls by what they actually poll for (callback polls always poll for readable) */
                 events &= us_poll_events(poll);
@@ -174,18 +183,23 @@ void us_loop_run(struct us_loop_t *loop) {
     }
 }
 
-void bun_on_tick_before(void* ctx);
-void bun_on_tick_after(void* ctx);
+#if defined(LIBUS_USE_EPOLL) 
 
+// static int has_epoll_pwait2 = 0;
+// TODO:
 
-void us_loop_run_bun_tick(struct us_loop_t *loop, int64_t timeoutMs, void* tickCallbackContext) {
-    us_loop_integrate(loop);
+#endif
 
+void us_loop_run_bun_tick(struct us_loop_t *loop, const struct timespec* timeout) {
     if (loop->num_polls == 0)
         return;
 
-    if (tickCallbackContext) {
-        bun_on_tick_before(tickCallbackContext);
+    struct us_internal_callback_t *timer_callback = (struct us_internal_callback_t*)loop->data.sweep_timer;
+
+    // Only integrate the loop if we haven't already.
+    // Otherwise we will keep restarting the timer.
+    if(!timer_callback->cb) {
+        us_loop_integrate(loop);
     }
 
     /* Emit pre callback */
@@ -193,25 +207,14 @@ void us_loop_run_bun_tick(struct us_loop_t *loop, int64_t timeoutMs, void* tickC
 
     /* Fetch ready polls */
 #ifdef LIBUS_USE_EPOLL
-    if (timeoutMs > 0) {
-        loop->num_ready_polls = epoll_wait(loop->fd, loop->ready_polls, 1024, (int)timeoutMs);
-    } else {
-        loop->num_ready_polls = epoll_wait(loop->fd, loop->ready_polls, 1024, -1);
+    int timeoutMs = -1; 
+    if (timeout) {
+        timeoutMs = timeout->tv_sec * 1000 + timeout->tv_nsec / 1000000;
     }
+    loop->num_ready_polls = epoll_wait(loop->fd, loop->ready_polls, 1024, timeoutMs);
 #else
-    if (timeoutMs > 0) {
-        struct timespec ts = {0, 0};
-        ts.tv_sec = timeoutMs / 1000;
-        ts.tv_nsec = (timeoutMs % 1000) * 1000000;
-        loop->num_ready_polls = kevent64(loop->fd, NULL, 0, loop->ready_polls, 1024, 0, &ts);
-    } else {
-        loop->num_ready_polls = kevent64(loop->fd, NULL, 0, loop->ready_polls, 1024, 0, NULL);
-    }
+    loop->num_ready_polls = kevent64(loop->fd, NULL, 0, loop->ready_polls, 1024, 0, timeout);
 #endif
-
-    if (tickCallbackContext) {
-        bun_on_tick_after(tickCallbackContext);
-    }
 
     /* Iterate ready polls, dispatching them by type */
     for (loop->current_ready_poll = 0; loop->current_ready_poll < loop->num_ready_polls; loop->current_ready_poll++) {
@@ -224,14 +227,21 @@ void us_loop_run_bun_tick(struct us_loop_t *loop, int64_t timeoutMs, void* tickC
             }
 #ifdef LIBUS_USE_EPOLL
             int events = loop->ready_polls[loop->current_ready_poll].events;
-            int error = loop->ready_polls[loop->current_ready_poll].events & (EPOLLERR | EPOLLHUP);
+            const int error = events & (EPOLLERR | EPOLLHUP);
 #else
-            /* EVFILT_READ, EVFILT_TIME, EVFILT_USER are all mapped to LIBUS_SOCKET_READABLE */
-            int events = LIBUS_SOCKET_READABLE;
-            if (loop->ready_polls[loop->current_ready_poll].filter == EVFILT_WRITE) {
-                events = LIBUS_SOCKET_WRITABLE;
-            }
-            int error = loop->ready_polls[loop->current_ready_poll].flags & (EV_ERROR | EV_EOF);
+            const struct kevent64_s* current_kevent = &loop->ready_polls[loop->current_ready_poll];
+            const int16_t filter = current_kevent->filter;
+            const uint16_t flags = current_kevent->flags;
+            const uint32_t fflags = current_kevent->fflags;
+
+            // > Multiple events which trigger the filter do not result in multiple kevents being placed on the kqueue
+            // > Instead, the filter will aggregate the events into a single kevent struct
+            int events = 0
+                | ((filter & EVFILT_READ) ? LIBUS_SOCKET_READABLE : 0)
+                | ((filter & EVFILT_WRITE) ? LIBUS_SOCKET_WRITABLE : 0);
+
+            // Note: EV_ERROR only sets the error in data as part of changelist. Not in this call!
+            const int error = (flags & (EV_ERROR | EV_EOF)) ? ((int)fflags || 1) : 0;
 #endif
             /* Always filter all polls by what they actually poll for (callback polls always poll for readable) */
             events &= us_poll_events(poll);
@@ -286,7 +296,7 @@ int kqueue_change(int kqfd, int fd, int old_events, int new_events, void *user_d
         EV_SET64(&change_list[change_length++], fd, EVFILT_WRITE, (new_events & LIBUS_SOCKET_WRITABLE) ? EV_ADD : EV_DELETE, 0, 0, (uint64_t)(void*)user_data, 0, 0);
     }
 
-    int ret = kevent64(kqfd, change_list, change_length, NULL, 0, 0, NULL);
+    int ret = kevent64(kqfd, change_list, change_length, change_list, change_length, KEVENT_FLAG_ERROR_EVENTS, NULL);
 
     // ret should be 0 in most cases (not guaranteed when removing async)
 
@@ -380,6 +390,7 @@ unsigned int us_internal_accept_poll_event(struct us_poll_t *p) {
 #ifdef LIBUS_USE_EPOLL
 struct us_timer_t *us_create_timer(struct us_loop_t *loop, int fallthrough, unsigned int ext_size) {
     struct us_poll_t *p = us_create_poll(loop, fallthrough, sizeof(struct us_internal_callback_t) + ext_size);
+    memset(p, 0, sizeof(struct us_internal_callback_t) + ext_size);
     int timerfd = timerfd_create(CLOCK_REALTIME, TFD_NONBLOCK | TFD_CLOEXEC);
     if (timerfd == -1) {
       return NULL;
@@ -390,12 +401,13 @@ struct us_timer_t *us_create_timer(struct us_loop_t *loop, int fallthrough, unsi
     cb->loop = loop;
     cb->cb_expects_the_loop = 0;
     cb->leave_poll_ready = 0;
+    cb->has_added_timer_to_event_loop = 0;
 
     return (struct us_timer_t *) cb;
 }
 #else
 struct us_timer_t *us_create_timer(struct us_loop_t *loop, int fallthrough, unsigned int ext_size) {
-    struct us_internal_callback_t *cb = us_malloc(sizeof(struct us_internal_callback_t) + ext_size);
+    struct us_internal_callback_t *cb = us_calloc(1, sizeof(struct us_internal_callback_t) + ext_size);
 
     cb->loop = loop;
     cb->cb_expects_the_loop = 0;
@@ -414,14 +426,18 @@ struct us_timer_t *us_create_timer(struct us_loop_t *loop, int fallthrough, unsi
 #endif
 
 #ifdef LIBUS_USE_EPOLL
-void us_timer_close(struct us_timer_t *timer) {
+void us_timer_close(struct us_timer_t *timer, int fallthrough) {
     struct us_internal_callback_t *cb = (struct us_internal_callback_t *) timer;
 
     us_poll_stop(&cb->p, cb->loop);
     close(us_poll_fd(&cb->p));
 
-    /* (regular) sockets are the only polls which are not freed immediately */
-    us_poll_free((struct us_poll_t *) timer, cb->loop);
+     /* (regular) sockets are the only polls which are not freed immediately */
+    if(fallthrough){
+        us_free(timer);
+    }else {
+        us_poll_free((struct us_poll_t *) timer, cb->loop);
+    }
 }
 
 void us_timer_set(struct us_timer_t *t, void (*cb)(struct us_timer_t *t), int ms, int repeat_ms) {
@@ -435,18 +451,30 @@ void us_timer_set(struct us_timer_t *t, void (*cb)(struct us_timer_t *t), int ms
     };
 
     timerfd_settime(us_poll_fd((struct us_poll_t *) t), 0, &timer_spec, NULL);
+
+    // Avoid the system call overhead of re-adding this timer to the event loop only to receive EEXIST
+    if (internal_cb->loop->data.sweep_timer == t) {
+        if (internal_cb->has_added_timer_to_event_loop) {
+            return;
+        }
+        internal_cb->has_added_timer_to_event_loop = 1;
+    }
     us_poll_start((struct us_poll_t *) t, internal_cb->loop, LIBUS_SOCKET_READABLE);
 }
 #else
-void us_timer_close(struct us_timer_t *timer) {
+void us_timer_close(struct us_timer_t *timer, int fallthrough) {
     struct us_internal_callback_t *internal_cb = (struct us_internal_callback_t *) timer;
 
     struct kevent64_s event;
     EV_SET64(&event, (uint64_t) (void*) internal_cb, EVFILT_TIMER, EV_DELETE, 0, 0, (uint64_t)internal_cb, 0, 0);
-    kevent64(internal_cb->loop->fd, &event, 1, NULL, 0, 0, NULL);
+    kevent64(internal_cb->loop->fd, &event, 1, &event, 1, KEVENT_FLAG_ERROR_EVENTS, NULL);
 
     /* (regular) sockets are the only polls which are not freed immediately */
-    us_poll_free((struct us_poll_t *) timer, internal_cb->loop);
+    if(fallthrough){
+        us_free(timer);
+    }else {
+        us_poll_free((struct us_poll_t *) timer, internal_cb->loop);
+    }
 }
 
 void us_timer_set(struct us_timer_t *t, void (*cb)(struct us_timer_t *t), int ms, int repeat_ms) {
@@ -458,7 +486,7 @@ void us_timer_set(struct us_timer_t *t, void (*cb)(struct us_timer_t *t), int ms
     struct kevent64_s event;
     uint64_t ptr = (uint64_t)(void*)internal_cb;
     EV_SET64(&event, ptr, EVFILT_TIMER, EV_ADD | (repeat_ms ? 0 : EV_ONESHOT), 0, ms, (uint64_t)internal_cb, 0, 0);
-    kevent64(internal_cb->loop->fd, &event, 1, NULL, 0, 0, NULL);
+    kevent64(internal_cb->loop->fd, &event, 1, &event, 1, KEVENT_FLAG_ERROR_EVENTS, NULL);
 }
 #endif
 
@@ -466,6 +494,8 @@ void us_timer_set(struct us_timer_t *t, void (*cb)(struct us_timer_t *t), int ms
 #ifdef LIBUS_USE_EPOLL
 struct us_internal_async *us_internal_create_async(struct us_loop_t *loop, int fallthrough, unsigned int ext_size) {
     struct us_poll_t *p = us_create_poll(loop, fallthrough, sizeof(struct us_internal_callback_t) + ext_size);
+    memset(p, 0, sizeof(struct us_internal_callback_t) + ext_size);
+
     us_poll_init(p, eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC), POLL_TYPE_CALLBACK);
 
     struct us_internal_callback_t *cb = (struct us_internal_callback_t *) p;
@@ -505,8 +535,7 @@ void us_internal_async_wakeup(struct us_internal_async *a) {
 #define MACHPORT_BUF_LEN 1024
 
 struct us_internal_async *us_internal_create_async(struct us_loop_t *loop, int fallthrough, unsigned int ext_size) {
-    struct us_internal_callback_t *cb = us_malloc(sizeof(struct us_internal_callback_t) + ext_size);
-
+    struct us_internal_callback_t *cb = us_calloc(1, sizeof(struct us_internal_callback_t) + ext_size);
     cb->loop = loop;
     cb->cb_expects_the_loop = 1;
     cb->leave_poll_ready = 0;
@@ -536,7 +565,7 @@ void us_internal_async_close(struct us_internal_async *a) {
     struct kevent64_s event;
     uint64_t ptr = (uint64_t)(void*)internal_cb;
     EV_SET64(&event, ptr, EVFILT_MACHPORT, EV_DELETE, 0, 0, (uint64_t)(void*)internal_cb, 0,0);
-    kevent64(internal_cb->loop->fd, &event, 1, NULL, 0, 0, NULL);
+    kevent64(internal_cb->loop->fd, &event, 1, &event, 1, KEVENT_FLAG_ERROR_EVENTS, NULL);
 
     mach_port_deallocate(mach_task_self(), internal_cb->port);
     us_free(internal_cb->machport_buf);
@@ -564,7 +593,7 @@ void us_internal_async_set(struct us_internal_async *a, void (*cb)(struct us_int
     event.ext[1] = MACHPORT_BUF_LEN;
     event.udata = (uint64_t)(void*)internal_cb;
 
-    int ret = kevent64(internal_cb->loop->fd, &event, 1, NULL, 0, 0, NULL);
+    int ret = kevent64(internal_cb->loop->fd, &event, 1, &event, 1, KEVENT_FLAG_ERROR_EVENTS, NULL);
 
     if (UNLIKELY(ret == -1)) {
        abort();
@@ -588,5 +617,14 @@ void us_internal_async_wakeup(struct us_internal_async *a) {
     }
 }
 #endif
+
+int us_socket_get_error(int ssl, struct us_socket_t *s) {
+    int error = 0;
+    socklen_t len = sizeof(error);
+    if (getsockopt(us_poll_fd((struct us_poll_t *) s), SOL_SOCKET, SO_ERROR, (char *) &error, &len) == -1) {
+        return errno;
+    }
+    return error;
+}
 
 #endif

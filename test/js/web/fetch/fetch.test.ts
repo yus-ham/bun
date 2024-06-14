@@ -1,16 +1,17 @@
-import { AnyFunction, serve, ServeOptions, Server, sleep } from "bun";
+import { AnyFunction, serve, ServeOptions, Server, sleep, TCPSocketListener } from "bun";
 import { afterAll, afterEach, beforeAll, describe, expect, it, beforeEach } from "bun:test";
-import { chmodSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "fs";
+import { chmodSync, readFileSync, rmSync, writeFileSync } from "fs";
 import { mkfifo } from "mkfifo";
-import { tmpdir } from "os";
+import { gzipSync } from "zlib";
 import { join } from "path";
-import { gc, withoutAggressiveGC, gcTick } from "harness";
+import { gc, withoutAggressiveGC, isWindows, bunExe, bunEnv, tmpdirSync } from "harness";
 import net from "net";
 
-const tmp_dir = mkdtempSync(join(realpathSync(tmpdir()), "fetch.test"));
+const tmp_dir = tmpdirSync();
 
-const fixture = readFileSync(join(import.meta.dir, "fetch.js.txt"), "utf8");
-
+const fixture = readFileSync(join(import.meta.dir, "fetch.js.txt"), "utf8").replaceAll("\r\n", "\n");
+const fetchFixture3 = join(import.meta.dir, "fetch-leak-test-fixture-3.js");
+const fetchFixture4 = join(import.meta.dir, "fetch-leak-test-fixture-4.js");
 let server: Server;
 function startServer({ fetch, ...options }: ServeOptions) {
   server = serve({
@@ -218,10 +219,7 @@ describe("AbortSignal", () => {
         await sleep(1);
         controller.abort();
       }
-      await Promise.all([
-        fetch(`http://127.0.0.1:${server.port}`, { signal: signal }).then(res => res.text()),
-        manualAbort(),
-      ]);
+      await Promise.all([fetch(server.url, { signal: signal }).then(res => res.text()), manualAbort()]);
     }).toThrow(new DOMException("The operation was aborted."));
   });
 
@@ -244,10 +242,7 @@ describe("AbortSignal", () => {
         await sleep(10);
         controller.abort(new Error("My Reason"));
       }
-      await Promise.all([
-        fetch(`http://127.0.0.1:${server.port}`, { signal: signal }).then(res => res.text()),
-        manualAbort(),
-      ]);
+      await Promise.all([fetch(server.url, { signal: signal }).then(res => res.text()), manualAbort()]);
     }).toThrow("My Reason");
   });
 
@@ -267,10 +262,7 @@ describe("AbortSignal", () => {
         await sleep(10);
         controller.abort();
       }
-      await Promise.all([
-        fetch(`http://127.0.0.1:${server.port}`, { signal: signal }).then(res => res.text()),
-        manualAbort(),
-      ]);
+      await Promise.all([fetch(server.url, { signal: signal }).then(res => res.text()), manualAbort()]);
     }).toThrow(new DOMException("The operation was aborted."));
   });
 
@@ -296,8 +288,15 @@ describe("AbortSignal", () => {
     const signal = AbortSignal.timeout(10);
 
     try {
-      await fetch(`http://127.0.0.1:${server.port}`, { signal: signal }).then(res => res.text());
-      expect(() => {}).toThrow();
+      using server = Bun.serve({
+        port: 0,
+        async fetch() {
+          await Bun.sleep(100);
+          return new Response("Hello");
+        },
+      });
+      await fetch(server.url, { signal: signal }).then(res => res.text());
+      expect.unreachable();
     } catch (ex: any) {
       expect(ex.name).toBe("TimeoutError");
     }
@@ -312,7 +311,7 @@ describe("AbortSignal", () => {
     }
 
     try {
-      const request = new Request(`http://127.0.0.1:${server.port}`, { signal });
+      const request = new Request(server.url, { signal });
       await Promise.all([fetch(request).then(res => res.text()), manualAbort()]);
       expect(() => {}).toThrow();
     } catch (ex: any) {
@@ -346,6 +345,27 @@ describe("Headers", () => {
     expect(headers.getAll("set-cookie")).toEqual(["foo=bar; Path=/; HttpOnly"]);
   });
 
+  it("presence of content-encoding header(issue #5668)", async () => {
+    startServer({
+      fetch(req) {
+        const content = gzipSync(JSON.stringify({ message: "Hello world" }));
+        return new Response(content, {
+          status: 200,
+          headers: {
+            "content-encoding": "gzip",
+            "content-type": "application/json",
+          },
+        });
+      },
+    });
+    const result = await fetch(`http://${server.hostname}:${server.port}/`);
+    const value = result.headers.get("content-encoding");
+    const body = await result.json();
+    expect(value).toBe("gzip");
+    expect(body).toBeDefined();
+    expect(body.message).toBe("Hello world");
+  });
+
   it(".getSetCookie() with array", () => {
     const headers = new Headers([
       ["content-length", "123"],
@@ -373,6 +393,19 @@ describe("Headers", () => {
       ["set-cookie", "bar=baz"],
     ]);
     expect([...headers.values()]).toEqual(["abc, def", "foo=bar", "bar=baz"]);
+  });
+
+  it("Set-Cookies toJSON", () => {
+    const headers = new Headers([
+      ["Set-Cookie", "foo=bar"],
+      ["Set-Cookie", "bar=baz"],
+      ["X-bun", "abc"],
+      ["X-bun", "def"],
+    ]).toJSON();
+    expect(headers).toEqual({
+      "x-bun": "abc, def",
+      "set-cookie": ["foo=bar", "bar=baz"],
+    });
   });
 
   it("Headers append multiple", () => {
@@ -514,6 +547,43 @@ describe("fetch", () => {
     }
   });
 
+  it("should properly redirect to another port #7793", async () => {
+    var socket: net.Server | null = null;
+    try {
+      using server = Bun.serve({
+        port: 0,
+        tls: {
+          "cert":
+            "-----BEGIN CERTIFICATE-----\nMIIDrzCCApegAwIBAgIUHaenuNcUAu0tjDZGpc7fK4EX78gwDQYJKoZIhvcNAQEL\nBQAwaTELMAkGA1UEBhMCVVMxCzAJBgNVBAgMAkNBMRYwFAYDVQQHDA1TYW4gRnJh\nbmNpc2NvMQ0wCwYDVQQKDARPdmVuMREwDwYDVQQLDAhUZWFtIEJ1bjETMBEGA1UE\nAwwKc2VydmVyLWJ1bjAeFw0yMzA5MDYyMzI3MzRaFw0yNTA5MDUyMzI3MzRaMGkx\nCzAJBgNVBAYTAlVTMQswCQYDVQQIDAJDQTEWMBQGA1UEBwwNU2FuIEZyYW5jaXNj\nbzENMAsGA1UECgwET3ZlbjERMA8GA1UECwwIVGVhbSBCdW4xEzARBgNVBAMMCnNl\ncnZlci1idW4wggEiMA0GCSqGSIb3DQEBAQUAA4IBDwAwggEKAoIBAQC+7odzr3yI\nYewRNRGIubF5hzT7Bym2dDab4yhaKf5drL+rcA0J15BM8QJ9iSmL1ovg7x35Q2MB\nKw3rl/Yyy3aJS8whZTUze522El72iZbdNbS+oH6GxB2gcZB6hmUehPjHIUH4icwP\ndwVUeR6fB7vkfDddLXe0Tb4qsO1EK8H0mr5PiQSXfj39Yc1QHY7/gZ/xeSrt/6yn\n0oH9HbjF2XLSL2j6cQPKEayartHN0SwzwLi0eWSzcziVPSQV7c6Lg9UuIHbKlgOF\nzDpcp1p1lRqv2yrT25im/dS6oy9XX+p7EfZxqeqpXX2fr5WKxgnzxI3sW93PG8FU\nIDHtnUsoHX3RAgMBAAGjTzBNMCwGA1UdEQQlMCOCCWxvY2FsaG9zdIcEfwAAAYcQ\nAAAAAAAAAAAAAAAAAAAAATAdBgNVHQ4EFgQUF3y/su4J/8ScpK+rM2LwTct6EQow\nDQYJKoZIhvcNAQELBQADggEBAGWGWp59Bmrk3Gt0bidFLEbvlOgGPWCT9ZrJUjgc\nhY44E+/t4gIBdoKOSwxo1tjtz7WsC2IYReLTXh1vTsgEitk0Bf4y7P40+pBwwZwK\naeIF9+PC6ZoAkXGFRoyEalaPVQDBg/DPOMRG9OH0lKfen9OGkZxmmjRLJzbyfAhU\noI/hExIjV8vehcvaJXmkfybJDYOYkN4BCNqPQHNf87ZNdFCb9Zgxwp/Ou+47J5k4\n5plQ+K7trfKXG3ABMbOJXNt1b0sH8jnpAsyHY4DLEQqxKYADbXsr3YX/yy6c0eOo\nX2bHGD1+zGsb7lGyNyoZrCZ0233glrEM4UxmvldBcWwOWfk=\n-----END CERTIFICATE-----\n",
+          "key":
+            "-----BEGIN PRIVATE KEY-----\nMIIEvgIBADANBgkqhkiG9w0BAQEFAASCBKgwggSkAgEAAoIBAQC+7odzr3yIYewR\nNRGIubF5hzT7Bym2dDab4yhaKf5drL+rcA0J15BM8QJ9iSmL1ovg7x35Q2MBKw3r\nl/Yyy3aJS8whZTUze522El72iZbdNbS+oH6GxB2gcZB6hmUehPjHIUH4icwPdwVU\neR6fB7vkfDddLXe0Tb4qsO1EK8H0mr5PiQSXfj39Yc1QHY7/gZ/xeSrt/6yn0oH9\nHbjF2XLSL2j6cQPKEayartHN0SwzwLi0eWSzcziVPSQV7c6Lg9UuIHbKlgOFzDpc\np1p1lRqv2yrT25im/dS6oy9XX+p7EfZxqeqpXX2fr5WKxgnzxI3sW93PG8FUIDHt\nnUsoHX3RAgMBAAECggEAAckMqkn+ER3c7YMsKRLc5bUE9ELe+ftUwfA6G+oXVorn\nE+uWCXGdNqI+TOZkQpurQBWn9IzTwv19QY+H740cxo0ozZVSPE4v4czIilv9XlVw\n3YCNa2uMxeqp76WMbz1xEhaFEgn6ASTVf3hxYJYKM0ljhPX8Vb8wWwlLONxr4w4X\nOnQAB5QE7i7LVRsQIpWKnGsALePeQjzhzUZDhz0UnTyGU6GfC+V+hN3RkC34A8oK\njR3/Wsjahev0Rpb+9Pbu3SgTrZTtQ+srlRrEsDG0wVqxkIk9ueSMOHlEtQ7zYZsk\nlX59Bb8LHNGQD5o+H1EDaC6OCsgzUAAJtDRZsPiZEQKBgQDs+YtVsc9RDMoC0x2y\nlVnP6IUDXt+2UXndZfJI3YS+wsfxiEkgK7G3AhjgB+C+DKEJzptVxP+212hHnXgr\n1gfW/x4g7OWBu4IxFmZ2J/Ojor+prhHJdCvD0VqnMzauzqLTe92aexiexXQGm+WW\nwRl3YZLmkft3rzs3ZPhc1G2X9QKBgQDOQq3rrxcvxSYaDZAb+6B/H7ZE4natMCiz\nLx/cWT8n+/CrJI2v3kDfdPl9yyXIOGrsqFgR3uhiUJnz+oeZFFHfYpslb8KvimHx\nKI+qcVDcprmYyXj2Lrf3fvj4pKorc+8TgOBDUpXIFhFDyM+0DmHLfq+7UqvjU9Hs\nkjER7baQ7QKBgQDTh508jU/FxWi9RL4Jnw9gaunwrEt9bxUc79dp+3J25V+c1k6Q\nDPDBr3mM4PtYKeXF30sBMKwiBf3rj0CpwI+W9ntqYIwtVbdNIfWsGtV8h9YWHG98\nJ9q5HLOS9EAnogPuS27walj7wL1k+NvjydJ1of+DGWQi3aQ6OkMIegap0QKBgBlR\nzCHLa5A8plG6an9U4z3Xubs5BZJ6//QHC+Uzu3IAFmob4Zy+Lr5/kITlpCyw6EdG\n3xDKiUJQXKW7kluzR92hMCRnVMHRvfYpoYEtydxcRxo/WS73SzQBjTSQmicdYzLE\ntkLtZ1+ZfeMRSpXy0gR198KKAnm0d2eQBqAJy0h9AoGBAM80zkd+LehBKq87Zoh7\ndtREVWslRD1C5HvFcAxYxBybcKzVpL89jIRGKB8SoZkF7edzhqvVzAMP0FFsEgCh\naClYGtO+uo+B91+5v2CCqowRJUGfbFOtCuSPR7+B3LDK8pkjK2SQ0mFPUfRA5z0z\nNVWtC0EYNBTRkqhYtqr3ZpUc\n-----END PRIVATE KEY-----\n",
+        },
+        fetch() {
+          return new Response("Hello, world!");
+        },
+      });
+
+      socket = net.createServer(socket => {
+        socket.on("data", () => {
+          // we redirect and close the connection here
+          socket.end(`HTTP/1.1 301 Moved Permanently\r\nLocation: ${server?.url}\r\nConnection: close\r\n\r\n`);
+        });
+      });
+
+      const { promise, resolve, reject } = Promise.withResolvers();
+      socket.on("error", reject);
+      socket.listen(0, "localhost", async () => {
+        await fetch(`http://localhost:${socket?.address()?.port}/`, { tls: { rejectUnauthorized: false } });
+        const response = await fetch(server?.url, { tls: { rejectUnauthorized: false } }).then(res => res.text());
+        resolve(response);
+      });
+
+      expect(await promise).toBe("Hello, world!");
+    } finally {
+      socket?.close();
+    }
+  });
+
   it("provide body", async () => {
     startServer({
       fetch(req) {
@@ -558,13 +628,12 @@ describe("fetch", () => {
   });
 
   it("should work with ipv6 localhost", async () => {
-    const server = Bun.serve({
+    using server = Bun.serve({
       port: 0,
       fetch(req) {
         return new Response("Pass!");
       },
     });
-
     let res = await fetch(`http://[::1]:${server.port}`);
     expect(await res.text()).toBe("Pass!");
     res = await fetch(`http://[::]:${server.port}/`);
@@ -573,8 +642,6 @@ describe("fetch", () => {
     expect(await res.text()).toBe("Pass!");
     res = await fetch(`http://[0000:0000:0000:0000:0000:0000:0000:0001]:${server.port}/`);
     expect(await res.text()).toBe("Pass!");
-
-    server.stop();
   });
 });
 
@@ -684,6 +751,29 @@ function testBlobInterface(blobbyConstructor: { (..._: any[]): any }, hasBlobFn?
         if (withGC) gc();
       });
 
+      it(`${jsonObject.hello === true ? "latin1" : "utf16"} bytes${withGC ? " (with gc) " : ""}`, async () => {
+        if (withGC) gc();
+
+        var response = blobbyConstructor(JSON.stringify(jsonObject));
+        if (withGC) gc();
+
+        const bytes = new TextEncoder().encode(JSON.stringify(jsonObject));
+        if (withGC) gc();
+
+        const compare = await response.bytes();
+        if (withGC) gc();
+
+        withoutAggressiveGC(() => {
+          for (let i = 0; i < compare.length; i++) {
+            if (withGC) gc();
+
+            expect(compare[i]).toBe(bytes[i]);
+            if (withGC) gc();
+          }
+        });
+        if (withGC) gc();
+      });
+
       it(`${jsonObject.hello === true ? "latin1" : "utf16"} arrayBuffer -> arrayBuffer${
         withGC ? " (with gc) " : ""
       }`, async () => {
@@ -696,6 +786,31 @@ function testBlobInterface(blobbyConstructor: { (..._: any[]): any }, hasBlobFn?
         if (withGC) gc();
 
         const compare = new Uint8Array(await response.arrayBuffer());
+        if (withGC) gc();
+
+        withoutAggressiveGC(() => {
+          for (let i = 0; i < compare.length; i++) {
+            if (withGC) gc();
+
+            expect(compare[i]).toBe(bytes[i]);
+            if (withGC) gc();
+          }
+        });
+        if (withGC) gc();
+      });
+
+      it(`${jsonObject.hello === true ? "latin1" : "utf16"} arrayBuffer -> bytes${
+        withGC ? " (with gc) " : ""
+      }`, async () => {
+        if (withGC) gc();
+
+        var response = blobbyConstructor(new TextEncoder().encode(JSON.stringify(jsonObject)));
+        if (withGC) gc();
+
+        const bytes = new TextEncoder().encode(JSON.stringify(jsonObject));
+        if (withGC) gc();
+
+        const compare = await response.bytes();
         if (withGC) gc();
 
         withoutAggressiveGC(() => {
@@ -754,41 +869,37 @@ describe("Bun.file", () => {
     return file;
   });
 
-  it("size is Infinity on a fifo", () => {
+  // this test uses libc.so or dylib so we skip on windows
+  it.skipIf(isWindows)("size is Infinity on a fifo", () => {
     const path = join(tmp_dir, "test-fifo");
     mkfifo(path);
     const { size } = Bun.file(path);
     expect(size).toBe(Infinity);
   });
 
-  const method = ["arrayBuffer", "text", "json"] as const;
+  const method = ["arrayBuffer", "text", "json", "bytes"] as const;
   function forEachMethod(fn: (m: (typeof method)[number]) => any, skip?: AnyFunction) {
     for (const m of method) {
       (skip ? it.skip : it)(m, fn(m));
     }
   }
 
-  describe("bad permissions throws", () => {
+  // on Windows the creator of the file will be able to read from it so this test is disabled on it
+  describe.skipIf(isWindows)("bad permissions throws", () => {
     const path = join(tmp_dir, "my-new-file");
     beforeAll(async () => {
       await Bun.write(path, "hey");
-      chmodSync(path, 0o000);
+      chmodSync(path, 0x000);
     });
 
-    forEachMethod(
-      m => () => {
-        const file = Bun.file(path);
-        expect(async () => await file[m]()).toThrow("Permission denied");
-      },
-      () => {
-        try {
-          readFileSync(path);
-        } catch {
-          return false;
-        }
-        return true;
-      },
-    );
+    forEachMethod(m => () => {
+      const file = Bun.file(path);
+      expect(async () => await file[m]()).toThrow("Permission denied");
+    });
+
+    afterAll(() => {
+      rmSync(path, { force: true });
+    });
   });
 
   describe("non-existent file throws", () => {
@@ -1052,7 +1163,7 @@ describe("Response", () => {
     });
     try {
       await body.json();
-      expect(false).toBe(true);
+      expect.unreachable();
     } catch (exception) {
       expect(exception instanceof SyntaxError).toBe(true);
     }
@@ -1163,10 +1274,10 @@ describe("Response", () => {
       }).toThrow("Body already used");
     });
     it("with Bun.file() streams", async () => {
-      var stream = Bun.file(import.meta.dir + "/fixtures/file.txt").stream();
+      var stream = Bun.file(join(import.meta.dir, "fixtures/file.txt")).stream();
       expect(stream instanceof ReadableStream).toBe(true);
       var input = new Response((await new Response(stream).blob()).stream()).arrayBuffer();
-      var output = Bun.file(import.meta.dir + "/fixtures/file.txt").arrayBuffer();
+      var output = Bun.file(join(import.meta.dir, "/fixtures/file.txt")).arrayBuffer();
       expect(await input).toEqual(await output);
     });
     it("with Bun.file() with request/response", async () => {
@@ -1180,13 +1291,13 @@ describe("Response", () => {
         },
       });
 
-      var response = await fetch(`http://127.0.0.1:${server.port}`, {
+      var response = await fetch(server.url, {
         method: "POST",
         body: await Bun.file(import.meta.dir + "/fixtures/file.txt").arrayBuffer(),
       });
       var input = await response.arrayBuffer();
       var output = await Bun.file(import.meta.dir + "/fixtures/file.txt").stream();
-      expect(input).toEqual((await output.getReader().read()).value?.buffer);
+      expect(new Uint8Array(input)).toEqual((await output.getReader().read()).value);
     });
   });
 
@@ -1488,7 +1599,7 @@ it("should work with http 100 continue on the same buffer", async () => {
 
 describe("should strip headers", () => {
   it("status code 303", async () => {
-    const server = Bun.serve({
+    using server = Bun.serve({
       port: 0,
       async fetch(request: Request) {
         if (request.url.endsWith("/redirect")) {
@@ -1519,11 +1630,10 @@ describe("should strip headers", () => {
     expect(headers.get("Content-Language")).toBeNull();
     expect(url).toEndWith("/redirected");
     expect(redirected).toBe(true);
-    server.stop(true);
   });
 
   it("cross-origin status code 302", async () => {
-    const server1 = Bun.serve({
+    await using server1 = Bun.serve({
       port: 0,
       async fetch(request: Request) {
         if (request.url.endsWith("/redirect")) {
@@ -1542,7 +1652,7 @@ describe("should strip headers", () => {
       },
     });
 
-    const server2 = Bun.serve({
+    await using server2 = Bun.serve({
       port: 0,
       async fetch(request: Request, server) {
         if (request.url.endsWith("/redirect")) {
@@ -1571,13 +1681,11 @@ describe("should strip headers", () => {
     expect(headers.get("Authorization")).toBeNull();
     expect(url).toEndWith("/redirected");
     expect(redirected).toBe(true);
-    server1.stop(true);
-    server2.stop(true);
   });
 });
 
 it("same-origin status code 302 should not strip headers", async () => {
-  const server = Bun.serve({
+  using server = Bun.serve({
     port: 0,
     async fetch(request: Request, server) {
       if (request.url.endsWith("/redirect")) {
@@ -1606,11 +1714,10 @@ it("same-origin status code 302 should not strip headers", async () => {
   expect(headers.get("Authorization")).toEqual("yes");
   expect(url).toEndWith("/redirected");
   expect(redirected).toBe(true);
-  server.stop(true);
 });
 
 describe("should handle relative location in the redirect, issue#5635", () => {
-  var server: Server;
+  let server: Server;
   beforeAll(async () => {
     server = Bun.serve({
       port: 0,
@@ -1669,8 +1776,9 @@ describe("should handle relative location in the redirect, issue#5635", () => {
   });
 });
 
-it("should throw RedirectURLTooLong when location is too long", async () => {
-  const server = Bun.serve({
+it("should allow very long redirect URLS", async () => {
+  const Location = "/" + "B".repeat(7 * 1024);
+  using server = Bun.serve({
     port: 0,
     async fetch(request: Request) {
       gc();
@@ -1678,7 +1786,7 @@ it("should throw RedirectURLTooLong when location is too long", async () => {
       if (url.pathname == "/redirect") {
         return new Response("redirecting", {
           headers: {
-            "Location": "B".repeat(8193),
+            Location,
           },
           status: 302,
         });
@@ -1688,19 +1796,12 @@ it("should throw RedirectURLTooLong when location is too long", async () => {
       });
     },
   });
-
-  let err = undefined;
-  try {
-    gc();
-    const resp = await fetch(`http://${server.hostname}:${server.port}/redirect`);
-  } catch (error) {
-    gc();
-    err = error;
+  // run it more times to check Malformed_HTTP_Response errors
+  for (let i = 0; i < 100; i++) {
+    const { url, status } = await fetch(`${server.url.origin}/redirect`);
+    expect(url).toBe(`${server.url.origin}${Location}`);
+    expect(status).toBe(404);
   }
-  expect(err).not.toBeUndefined();
-  expect(err).toBeInstanceOf(Error);
-  expect(err.code).toStrictEqual("RedirectURLTooLong");
-  server.stop(true);
 });
 
 it("304 not modified with missing content-length does not cause a request timeout", async () => {
@@ -1793,4 +1894,164 @@ it("304 not modified with 0 content-length does not cause a request timeout", as
   expect(response.status).toBe(304);
   expect(await response.arrayBuffer()).toHaveLength(0);
   server.stop(true);
+});
+
+describe("http/1.1 response body length", () => {
+  // issue #6932 (support response without Content-Length and Transfer-Encoding) + some regression tests
+
+  let server: TCPSocketListener | undefined;
+  beforeAll(async () => {
+    server = Bun.listen({
+      socket: {
+        open(socket) {
+          setTimeout(() => {
+            socket.end();
+          }, 9999).unref();
+        },
+        data(socket, data) {
+          const text = data.toString();
+          if (text.startsWith("GET /text")) {
+            socket.end("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\nHello, World!");
+          } else if (text.startsWith("GET /json")) {
+            socket.end('HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{"hello":"World"}');
+          } else if (text.startsWith("GET /chunked")) {
+            socket.end(
+              "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nTransfer-Encoding: chunked\r\n\r\nd\r\nHello, World!\r\n0\r\n\r\n",
+            );
+          } else if (text.startsWith("GET /empty")) {
+            socket.end("HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n");
+          } else if (text.startsWith("GET /keepalive/bad")) {
+            const resp = "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nConnection: keep-alive\r\n\r\nHello, World!";
+            socket.end(`${resp}${resp}`);
+          } else if (text.startsWith("GET /keepalive")) {
+            const resp =
+              "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nConnection: keep-alive\r\nContent-Length: 13\r\n\r\nHello, World!";
+            socket.end(`${resp}${resp}`);
+          } else {
+            socket.end(`HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 13\r\n\r\nHello, World!`);
+          }
+        },
+        close() {},
+      },
+      port: 0,
+      hostname: "localhost",
+    });
+  });
+  afterAll(() => {
+    server?.stop?.();
+  });
+
+  const getHost = () => `${server!.hostname}:${server!.port}`;
+
+  describe("without content-length", () => {
+    it("should read text until socket closed", async () => {
+      const response = await fetch(`http://${getHost()}/text`);
+      expect(response.status).toBe(200);
+      expect(response.text()).resolves.toBe("Hello, World!");
+    });
+
+    it("should read json until socket closed", async () => {
+      const response = await fetch(`http://${getHost()}/json`);
+      expect(response.status).toBe(200);
+      expect(response.json<unknown>()).resolves.toEqual({ "hello": "World" });
+    });
+
+    it("should disable keep-alive", async () => {
+      // according to http/1.1 spec, the keep-alive persistence behavior should be disabled when
+      // "Content-Length" header is not set (and response is not chunked)
+      // therefore the response text for this test should contain
+      // the 1st http response body + the full 2nd http response as text
+      const response = await fetch(`http://${getHost()}/keepalive/bad`);
+      expect(response.status).toBe(200);
+      expect(response.text()).resolves.toHaveLength(95);
+    });
+  });
+
+  it("should support keep-alive", async () => {
+    const response = await fetch(`http://${getHost()}/keepalive`);
+    expect(response.status).toBe(200);
+    expect(response.text()).resolves.toBe("Hello, World!");
+  });
+
+  it("should support transfer-encoding: chunked", async () => {
+    const response = await fetch(`http://${getHost()}/chunked`);
+    expect(response.status).toBe(200);
+    expect(response.text()).resolves.toBe("Hello, World!");
+  });
+
+  it("should support non-zero content-length", async () => {
+    const response = await fetch(`http://${getHost()}/non-empty`);
+    expect(response.status).toBe(200);
+    expect(response.text()).resolves.toBe("Hello, World!");
+  });
+
+  it("should support content-length: 0", async () => {
+    const response = await fetch(`http://${getHost()}/empty`);
+    expect(response.status).toBe(200);
+    expect(response.arrayBuffer()).resolves.toHaveLength(0);
+  });
+
+  it("should ignore body on HEAD", async () => {
+    const response = await fetch(`http://${getHost()}/text`, { method: "HEAD" });
+    expect(response.status).toBe(200);
+    expect(response.arrayBuffer()).resolves.toHaveLength(0);
+  });
+});
+describe("fetch Response life cycle", () => {
+  it("should not keep Response alive if not consumed", async () => {
+    const serverProcess = Bun.spawn({
+      cmd: [bunExe(), "--smol", fetchFixture3],
+      stderr: "inherit",
+      stdout: "pipe",
+      stdin: "ignore",
+      env: bunEnv,
+    });
+
+    async function getServerUrl() {
+      const reader = serverProcess.stdout.getReader();
+      const { done, value } = await reader.read();
+      return new TextDecoder().decode(value);
+    }
+    const serverUrl = await getServerUrl();
+    const clientProcess = Bun.spawn({
+      cmd: [bunExe(), "--smol", fetchFixture4, serverUrl],
+      stderr: "inherit",
+      stdout: "pipe",
+      stdin: "ignore",
+      env: bunEnv,
+    });
+    try {
+      expect(await clientProcess.exited).toBe(0);
+    } finally {
+      serverProcess.kill();
+    }
+  });
+  it("should allow to get promise result after response is GC'd", async () => {
+    const server = Bun.serve({
+      async fetch(request: Request) {
+        return new Response(
+          new ReadableStream({
+            async pull(controller) {
+              await Bun.sleep(100);
+              controller.enqueue(new TextEncoder().encode("Hello, World!"));
+              await Bun.sleep(100);
+              controller.close();
+            },
+          }),
+          { status: 200 },
+        );
+      },
+    });
+    async function fetchResponse() {
+      const response = await fetch(`${server.url.origin}/non-empty`);
+      return response.text();
+    }
+    try {
+      const response_promise = fetchResponse();
+      Bun.gc(true);
+      expect(await response_promise).toBe("Hello, World!");
+    } finally {
+      server.stop(true);
+    }
+  });
 });

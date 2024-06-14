@@ -22,16 +22,32 @@ fn fallback(url: string) void {
     Output.flush();
 }
 
-pub fn openURL(url: string) void {
+pub fn openURL(url: stringZ) void {
     if (comptime Environment.isWasi) return fallback(url);
 
-    var args_buf = [_]string{ opener, url };
-    var child_process = std.ChildProcess.init(&args_buf, default_allocator);
-    child_process.stderr_behavior = .Pipe;
-    child_process.stdin_behavior = .Ignore;
-    child_process.stdout_behavior = .Pipe;
-    child_process.spawn() catch return fallback(url);
-    _ = child_process.wait() catch return fallback(url);
+    var args_buf = [_]stringZ{ opener, url };
+
+    maybe_fallback: {
+        switch (bun.spawnSync(&.{
+            .argv = &args_buf,
+
+            .envp = null,
+
+            .stderr = .inherit,
+            .stdout = .inherit,
+            .stdin = .inherit,
+
+            .windows = if (Environment.isWindows) .{
+                .loop = bun.JSC.EventLoopHandle.init(bun.JSC.MiniEventLoop.initGlobal(null)),
+            } else {},
+        }) catch break :maybe_fallback) {
+            // don't fallback:
+            .result => |*result| if (result.isOK()) return,
+            .err => {},
+        }
+    }
+
+    fallback(url);
 }
 
 pub const Editor = enum(u8) {
@@ -90,7 +106,7 @@ pub const Editor = enum(u8) {
     }
 
     const which = @import("./which.zig").which;
-    pub fn byPATH(env: *DotEnv.Loader, buf: *[bun.MAX_PATH_BYTES]u8, cwd: string, out: *[]const u8) ?Editor {
+    pub fn byPATH(env: *DotEnv.Loader, buf: *bun.PathBuffer, cwd: string, out: *[]const u8) ?Editor {
         const PATH = env.get("PATH") orelse return null;
 
         inline for (default_preference_list) |editor| {
@@ -105,7 +121,7 @@ pub const Editor = enum(u8) {
         return null;
     }
 
-    pub fn byPATHForEditor(env: *DotEnv.Loader, editor: Editor, buf: *[bun.MAX_PATH_BYTES]u8, cwd: string, out: *[]const u8) bool {
+    pub fn byPATHForEditor(env: *DotEnv.Loader, editor: Editor, buf: *bun.PathBuffer, cwd: string, out: *[]const u8) bool {
         const PATH = env.get("PATH") orelse return false;
 
         if (bin_name.get(editor)) |path| {
@@ -136,7 +152,7 @@ pub const Editor = enum(u8) {
         return false;
     }
 
-    pub fn byFallback(env: *DotEnv.Loader, buf: *[bun.MAX_PATH_BYTES]u8, cwd: string, out: *[]const u8) ?Editor {
+    pub fn byFallback(env: *DotEnv.Loader, buf: *bun.PathBuffer, cwd: string, out: *[]const u8) ?Editor {
         inline for (default_preference_list) |editor| {
             if (byPATHForEditor(env, editor, buf, cwd, out)) {
                 return editor;
@@ -274,7 +290,7 @@ pub const Editor = enum(u8) {
             },
             .textmate => {
                 try file_path_buf_writer.writeAll(file);
-                var file_path = file_path_buf_stream.getWritten();
+                const file_path = file_path_buf_stream.getWritten();
 
                 if (line) |line_| {
                     if (line_.len > 0) {
@@ -288,7 +304,7 @@ pub const Editor = enum(u8) {
                                 try file_path_buf_writer.print(":{s}", .{col});
                         }
 
-                        var line_column = file_path_buf_stream.getWritten()[file_path.len..];
+                        const line_column = file_path_buf_stream.getWritten()[file_path.len..];
                         if (line_column.len > 0) {
                             args_buf[i] = line_column;
                             i += 1;
@@ -304,7 +320,7 @@ pub const Editor = enum(u8) {
             else => {
                 if (file.len > 0) {
                     try file_path_buf_writer.writeAll(file);
-                    var file_path = file_path_buf_stream.getWritten();
+                    const file_path = file_path_buf_stream.getWritten();
                     args_buf[i] = file_path;
                     i += 1;
                 }
@@ -359,7 +375,7 @@ pub const EditorContext = struct {
 
         var opened = try tmpdir.openFile(basename, .{});
         defer opened.close();
-        var path_buf: [bun.MAX_PATH_BYTES]u8 = undefined;
+        var path_buf: bun.PathBuffer = undefined;
         try editor_.open(
             path,
             try bun.getFdPath(opened.handle, &path_buf),
@@ -375,7 +391,7 @@ pub const EditorContext = struct {
         }
     }
     pub fn detectEditor(this: *EditorContext, env: *DotEnv.Loader) void {
-        var buf: [bun.MAX_PATH_BYTES]u8 = undefined;
+        var buf: bun.PathBuffer = undefined;
 
         var out: string = "";
         // first: choose from user preference

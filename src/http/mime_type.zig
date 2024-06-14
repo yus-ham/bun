@@ -91,7 +91,7 @@ pub const Category = enum {
 
 pub const none = MimeType.initComptime("", .none);
 pub const other = MimeType.initComptime("application/octet-stream", .other);
-pub const css = MimeType.initComptime("text/css", .css);
+pub const css = MimeType.initComptime("text/css;charset=utf-8", .css);
 pub const javascript = MimeType.initComptime("text/javascript;charset=utf-8", .javascript);
 pub const ico = MimeType.initComptime("image/vnd.microsoft.icon", .image);
 pub const html = MimeType.initComptime("text/html;charset=utf-8", .html);
@@ -2534,7 +2534,9 @@ pub const all = struct {
 pub fn byName(name: []const u8) MimeType {
     return MimeType.init(name, null, null);
 }
-
+pub fn deinit(mimeType: MimeType, allocator: std.mem.Allocator) void {
+    allocator.free(mimeType.value);
+}
 pub const extensions = ComptimeStringMap(MimeType, .{
     .{ "123", all.@"application/vnd.lotus-1-2-3" },
     .{ "1km", all.@"application/vnd.1000minds.decision-model+xml" },

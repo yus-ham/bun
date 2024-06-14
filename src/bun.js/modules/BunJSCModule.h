@@ -1,43 +1,43 @@
 #include "_NativeModule.h"
 
 #include "ExceptionOr.h"
-#include "JavaScriptCore/APICast.h"
-#include "JavaScriptCore/AggregateError.h"
-#include "JavaScriptCore/BytecodeIndex.h"
-#include "JavaScriptCore/CallFrameInlines.h"
-#include "JavaScriptCore/ClassInfo.h"
-#include "JavaScriptCore/CodeBlock.h"
-#include "JavaScriptCore/Completion.h"
-#include "JavaScriptCore/DeferTermination.h"
-#include "JavaScriptCore/Error.h"
-#include "JavaScriptCore/ErrorInstance.h"
-#include "JavaScriptCore/HeapSnapshotBuilder.h"
-#include "JavaScriptCore/JIT.h"
-#include "JavaScriptCore/JSBasePrivate.h"
-#include "JavaScriptCore/JSCInlines.h"
-#include "JavaScriptCore/JSONObject.h"
-#include "JavaScriptCore/JavaScript.h"
-#include "JavaScriptCore/ObjectConstructor.h"
-#include "JavaScriptCore/SamplingProfiler.h"
-#include "JavaScriptCore/TestRunnerUtils.h"
-#include "JavaScriptCore/VMTrapsInlines.h"
 #include "MessagePort.h"
 #include "SerializedScriptValue.h"
-#include "wtf/FileSystem.h"
-#include "wtf/MemoryFootprint.h"
-#include "wtf/text/WTFString.h"
+#include <JavaScriptCore/APICast.h>
+#include <JavaScriptCore/AggregateError.h>
+#include <JavaScriptCore/BytecodeIndex.h>
+#include <JavaScriptCore/CallFrameInlines.h>
+#include <JavaScriptCore/ClassInfo.h>
+#include <JavaScriptCore/CodeBlock.h>
+#include <JavaScriptCore/Completion.h>
+#include <JavaScriptCore/DeferTermination.h>
+#include <JavaScriptCore/Error.h>
+#include <JavaScriptCore/ErrorInstance.h>
+#include <JavaScriptCore/HeapSnapshotBuilder.h>
+#include <JavaScriptCore/JIT.h>
+#include <JavaScriptCore/JSBasePrivate.h>
+#include <JavaScriptCore/JSCInlines.h>
+#include <JavaScriptCore/JSONObject.h>
+#include <JavaScriptCore/JavaScript.h>
+#include <JavaScriptCore/ObjectConstructor.h>
+#include <JavaScriptCore/SamplingProfiler.h>
+#include <JavaScriptCore/TestRunnerUtils.h>
+#include <JavaScriptCore/VMTrapsInlines.h>
+#include <wtf/FileSystem.h>
+#include <wtf/MemoryFootprint.h>
+#include <wtf/text/WTFString.h>
 
-#include "Process.h"
+#include "BunProcess.h"
 #include <JavaScriptCore/SourceProviderCache.h>
 #if ENABLE(REMOTE_INSPECTOR)
-#include "JavaScriptCore/RemoteInspectorServer.h"
+#include <JavaScriptCore/RemoteInspectorServer.h>
 #endif
 
 #include "JSDOMConvertBase.h"
 #include "ZigSourceProvider.h"
 #include "mimalloc.h"
 
-#include "JavaScriptCore/ControlFlowProfiler.h"
+#include <JavaScriptCore/ControlFlowProfiler.h>
 
 using namespace JSC;
 using namespace WTF;
@@ -194,7 +194,6 @@ JSC_DEFINE_HOST_FUNCTION(functionMemoryUsageStatistics,
                          (JSGlobalObject * globalObject, CallFrame *)) {
 
   auto &vm = globalObject->vm();
-  JSC::DisallowGC disallowGC;
 
   // this is a C API function
   auto *stats = toJS(JSGetMemoryUsageStatistics(toRef(globalObject)));
@@ -204,6 +203,7 @@ JSC_DEFINE_HOST_FUNCTION(functionMemoryUsageStatistics,
     ASSERT(heapSizeValue.isNumber());
     if (heapSizeValue.toInt32(globalObject) == 0) {
       vm.heap.collectNow(Sync, CollectionScope::Full);
+      JSC::DisallowGC disallowGC;
       stats = toJS(JSGetMemoryUsageStatistics(toRef(globalObject)));
     }
   }
@@ -413,7 +413,6 @@ JSC_DECLARE_HOST_FUNCTION(functionGetProtectedObjects);
 JSC_DEFINE_HOST_FUNCTION(functionGetProtectedObjects,
                          (JSGlobalObject * globalObject, CallFrame *)) {
   MarkedArgumentBuffer list;
-  size_t result = 0;
   globalObject->vm().heap.forEachProtectedCell(
       [&](JSCell *cell) { list.append(cell); });
   RELEASE_ASSERT(!list.hasOverflowed());
@@ -466,9 +465,6 @@ JSC_DEFINE_HOST_FUNCTION(functionSetTimeZone, (JSGlobalObject * globalObject,
   String timeZoneName = callFrame->argument(0).toWTFString(globalObject);
   RETURN_IF_EXCEPTION(scope, encodedJSValue());
 
-  double time = callFrame->argument(1).toNumber(globalObject);
-  RETURN_IF_EXCEPTION(scope, encodedJSValue());
-
   if (!WTF::setTimeZoneOverride(timeZoneName)) {
     throwTypeError(globalObject, scope,
                    makeString("Invalid timezone: \""_s, timeZoneName, "\""_s));
@@ -477,7 +473,7 @@ JSC_DEFINE_HOST_FUNCTION(functionSetTimeZone, (JSGlobalObject * globalObject,
   vm.dateCache.resetIfNecessarySlow();
   WTF::Vector<UChar, 32> buffer;
   WTF::getTimeZoneOverride(buffer);
-  WTF::String timeZoneString(buffer.data(), buffer.size());
+  WTF::String timeZoneString({buffer.data(), buffer.size()});
   return JSValue::encode(jsString(vm, timeZoneString));
 }
 
@@ -653,7 +649,7 @@ JSC_DEFINE_HOST_FUNCTION(functionDeserialize, (JSGlobalObject * globalObject,
   RELEASE_AND_RETURN(throwScope, JSValue::encode(result));
 }
 
-extern "C" EncodedJSValue ByteRangeMapping__findExecutedLines(
+extern "C" JSC::EncodedJSValue ByteRangeMapping__findExecutedLines(
     JSC::JSGlobalObject *, BunString sourceURL, BasicBlockRange *ranges,
     size_t len, size_t functionOffset, bool ignoreSourceMap);
 
@@ -746,7 +742,7 @@ JSC_DEFINE_HOST_FUNCTION(functionCodeCoverageForFile,
 namespace Zig {
 DEFINE_NATIVE_MODULE(BunJSC)
 {
-    INIT_NATIVE_MODULE(33);
+    INIT_NATIVE_MODULE(34);
 
     putNativeFn(Identifier::fromString(vm, "callerSourceOrigin"_s), functionCallerSourceOrigin);
     putNativeFn(Identifier::fromString(vm, "jscDescribe"_s), functionDescribe);

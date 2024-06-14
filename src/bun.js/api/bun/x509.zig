@@ -2,7 +2,7 @@ const BoringSSL = bun.BoringSSL;
 const bun = @import("root").bun;
 const ZigString = JSC.ZigString;
 const std = @import("std");
-const JSC = @import("root").bun.JSC;
+const JSC = bun.JSC;
 const JSValue = JSC.JSValue;
 const JSGlobalObject = JSC.JSGlobalObject;
 
@@ -273,7 +273,8 @@ fn x509PrintGeneralName(out: *BoringSSL.BIO, name: *BoringSSL.GENERAL_NAME) bool
         // instead always print its numeric representation.
         var oline: [256]u8 = undefined;
         _ = BoringSSL.OBJ_obj2txt(&oline, @sizeOf(@TypeOf(oline)), name.d.rid, 1);
-        _ = BoringSSL.BIO_printf(out, "Registered ID:%s", &oline);
+        // Workaround for https://github.com/ziglang/zig/issues/16197
+        _ = BoringSSL.BIO_printf(out, "Registered ID:%s", @as([*]const u8, &oline));
     } else if (name.name_type == .GEN_X400) {
         _ = BoringSSL.BIO_printf(out, "X400Name:<unsupported>");
     } else if (name.name_type == .GEN_EDIPARTY) {
@@ -301,7 +302,8 @@ fn x509InfoAccessPrint(out: *BoringSSL.BIO, ext: *BoringSSL.X509_EXTENSION) bool
                 }
                 var tmp: [80]u8 = undefined;
                 _ = BoringSSL.i2t_ASN1_OBJECT(&tmp, @sizeOf(@TypeOf(tmp)), desc.method);
-                _ = BoringSSL.BIO_printf(out, "%s - ", &tmp);
+                // Workaround for https://github.com/ziglang/zig/issues/16197
+                _ = BoringSSL.BIO_printf(out, "%s - ", @as([*]const u8, &tmp));
 
                 if (!x509PrintGeneralName(out, desc.location)) {
                     return false;
@@ -419,7 +421,7 @@ fn getRawDERCertificate(cert: *BoringSSL.X509, globalObject: *JSGlobalObject) JS
     var buffer = JSValue.createBufferFromLength(globalObject, @as(usize, @intCast(size)));
     var buffer_ptr = buffer.asArrayBuffer(globalObject).?.ptr;
     const result_size = BoringSSL.i2d_X509(cert, &buffer_ptr);
-    std.debug.assert(result_size == size);
+    bun.assert(result_size == size);
     return buffer;
 }
 
@@ -518,10 +520,10 @@ pub fn toJS(cert: *BoringSSL.X509, globalObject: *JSGlobalObject) JSValue {
                     }
 
                     var buffer = JSValue.createBufferFromLength(globalObject, @as(usize, @intCast(size)));
-                    var buffer_ptr = @as([*c]u8, @ptrCast(buffer.asArrayBuffer(globalObject).?.ptr));
+                    const buffer_ptr = @as([*c]u8, @ptrCast(buffer.asArrayBuffer(globalObject).?.ptr));
 
                     const result_size = BoringSSL.EC_POINT_point2oct(group, point, form, buffer_ptr, size, null);
-                    std.debug.assert(result_size == size);
+                    bun.assert(result_size == size);
                     result.put(globalObject, ZigString.static("pubkey"), buffer);
                 } else {
                     result.put(globalObject, ZigString.static("pubkey"), JSValue.jsUndefined());

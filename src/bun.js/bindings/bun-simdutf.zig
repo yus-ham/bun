@@ -1,4 +1,5 @@
-const JSC = @import("root").bun.JSC;
+const bun = @import("root").bun;
+const JSC = bun.JSC;
 
 pub const SIMDUTFResult = extern struct {
     status: Status,
@@ -25,6 +26,13 @@ pub const SIMDUTFResult = extern struct {
         /// a high surrogate must be followed by a low surrogate and a low surrogate must be preceded by a high surrogate (UTF-16)
         too_large = 5,
         surrogate = 6,
+
+        /// Found a character that cannot be part of a valid base64 string.
+        invalid_base64_character = 7,
+        /// The base64 input terminates with a single character, excluding padding (=).
+        base64_input_remainder = 8,
+        /// The provided buffer is too small.
+        output_buffer_too_small = 9,
         /// Not related to validation/transcoding.
         _,
     };
@@ -258,16 +266,12 @@ pub const length = struct {
 
     pub const utf16 = struct {
         pub const from = struct {
-            pub const utf8 = struct {
-                pub fn le(input: []const u8) usize {
-                    JSC.markBinding(@src());
-                    return simdutf__utf16_length_from_utf8(input.ptr, input.len);
+            pub fn utf8(input: []const u8) usize {
+                if (@inComptime()) {
+                    return @import("std").unicode.utf8CountCodepoints(input) catch @compileError("Invalid UTF-8");
                 }
-                pub fn be(input: []const u8) usize {
-                    JSC.markBinding(@src());
-                    return simdutf__utf16_length_from_utf8(input.ptr, input.len);
-                }
-            };
+                return simdutf__utf16_length_from_utf8(input.ptr, input.len);
+            }
 
             pub fn utf32(input: []const u32) usize {
                 JSC.markBinding(@src());

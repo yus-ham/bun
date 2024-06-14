@@ -2,8 +2,8 @@
 
 #include "root.h"
 #include "headers-handwritten.h"
-#include "JavaScriptCore/JSGlobalObject.h"
-#include "JavaScriptCore/Strong.h"
+#include <JavaScriptCore/JSGlobalObject.h>
+#include <JavaScriptCore/Strong.h>
 #include "helpers.h"
 
 extern "C" JSC_DECLARE_HOST_FUNCTION(jsFunctionBunPlugin);
@@ -70,7 +70,14 @@ public:
         }
 
         VirtualModuleMap* virtualModules = nullptr;
+        bool mustDoExpensiveRelativeLookup = false;
         JSC::EncodedJSValue run(JSC::JSGlobalObject* globalObject, BunString* namespaceString, BunString* path);
+
+        bool hasVirtualModules() const { return virtualModules != nullptr; }
+
+        void addModuleMock(JSC::VM& vm, const String& path, JSC::JSObject* mock);
+
+        std::optional<String> resolveVirtualModule(const String& path, const String& from);
 
         ~OnLoad()
         {
@@ -97,5 +104,6 @@ class GlobalObject;
 } // namespace Zig
 
 namespace Bun {
-JSC::JSValue runVirtualModule(Zig::GlobalObject*, BunString* specifier);
+JSC::JSValue runVirtualModule(Zig::GlobalObject*, BunString* specifier, bool& wasModuleMock);
+JSC::Structure* createModuleMockStructure(JSC::VM& vm, JSC::JSGlobalObject* globalObject, JSC::JSValue prototype);
 }

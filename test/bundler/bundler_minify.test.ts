@@ -125,6 +125,81 @@ describe("bundler", () => {
       assert([...code.matchAll(/var /g)].length === 1, "expected only 1 variable declaration statement");
     },
   });
+  itBundled("minify/Infinity", {
+    files: {
+      "/entry.js": /* js */ `
+        capture(Infinity);
+        capture(-Infinity);
+        capture(Infinity + 1);
+        capture(-Infinity - 1);
+        capture(Infinity / 0);
+        capture(-Infinity / 0);
+        capture(Infinity * 0);
+        capture(-Infinity * 0);
+        capture(Infinity % 1);
+        capture(-Infinity % 1);
+        capture(Infinity ** 1);
+        capture(-(Infinity ** 1));
+        capture(~Infinity);
+        capture(~-Infinity);
+      `,
+    },
+    capture: [
+      "1 / 0",
+      "-1 / 0",
+      "1 / 0",
+      "-1 / 0",
+      "1 / 0",
+      "-1 / 0",
+      "NaN",
+      "NaN",
+      "NaN",
+      "NaN",
+      "1 / 0",
+      "-1 / 0",
+      "~(1 / 0)",
+      "~(-1 / 0)",
+    ],
+    minifySyntax: true,
+  });
+  itBundled("minify+whitespace/Infinity", {
+    files: {
+      "/entry.js": /* js */ `
+        capture(Infinity);
+        capture(-Infinity);
+        capture(Infinity + 1);
+        capture(-Infinity - 1);
+        capture(Infinity / 0);
+        capture(-Infinity / 0);
+        capture(Infinity * 0);
+        capture(-Infinity * 0);
+        capture(Infinity % 1);
+        capture(-Infinity % 1);
+        capture(Infinity ** 1);
+        capture((-Infinity) ** 2);
+        capture(~Infinity);
+        capture(~-Infinity);
+      `,
+    },
+    capture: [
+      "1/0",
+      "-1/0",
+      "1/0",
+      "-1/0",
+      "1/0",
+      "-1/0",
+      "NaN",
+      "NaN",
+      "NaN",
+      "NaN",
+      "1/0",
+      "1/0",
+      "~(1/0)",
+      "~(-1/0)",
+    ],
+    minifySyntax: true,
+    minifyWhitespace: true,
+  });
   itBundled("minify/InlineArraySpread", {
     files: {
       "/entry.js": /* js */ `
@@ -301,6 +376,26 @@ describe("bundler", () => {
     minifyWhitespace: true,
     minifySyntax: true,
     minifyIdentifiers: true,
+    target: "bun",
+    backend: "cli",
+    run: {
+      stdout: "PASS",
+    },
+  });
+  // https://github.com/oven-sh/bun/issues/6750
+  itBundled("minify/SwitchUndefined", {
+    files: {
+      "/entry.js": /* js */ `
+        switch (1) {
+          case undefined: {
+          }
+        }
+        console.log("PASS");
+      `,
+    },
+    minifyWhitespace: true,
+    minifySyntax: false,
+    minifyIdentifiers: false,
     target: "bun",
     backend: "cli",
     run: {
