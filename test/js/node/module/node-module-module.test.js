@@ -18,6 +18,9 @@ test("isBuiltin() works", () => {
   expect(isBuiltin("events")).toBe(true);
   expect(isBuiltin("node:events")).toBe(true);
   expect(isBuiltin("node:bacon")).toBe(false);
+
+  const net = require("net").createServer;
+console.info({net})
 });
 
 test("module.globalPaths exists", () => {
@@ -58,6 +61,17 @@ test("_nodeModulePaths() works", () => {
   ]);
 });
 
+
+test
+.skipIf(!Bun.argv[0].includes('debug'))
+("_preloadModules() works", () => {
+
+
+  console.info({_preloadModules: require('module').Module._preloadModules})
+
+  expect(require("module").Module._preloadModules).toBeFunction();
+});
+
 test("Module.wrap", () => {
   var mod = { exports: {} };
   expect(eval(wrap("exports.foo = 1; return 42"))(mod.exports, mod)).toBe(42);
@@ -72,6 +86,7 @@ test("Overwriting _resolveFilename", () => {
     stderr: "inherit",
   });
 
+  console.info({stdout: stdout.toString()})
   expect(stdout.toString().trim().endsWith("--pass--")).toBe(true);
   expect(exitCode).toBe(0);
 });
@@ -83,6 +98,9 @@ test("Overwriting Module.prototype.require", () => {
     stderr: "inherit",
   });
 
+
+
+  console.info({stdout2: stdout.toString()})
   expect(stdout.toString().trim().endsWith("--pass--")).toBe(true);
   expect(exitCode).toBe(0);
 });

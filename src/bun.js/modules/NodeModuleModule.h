@@ -158,6 +158,40 @@ JSC_DEFINE_HOST_FUNCTION(jsFunctionIsBuiltinModule, (JSC::JSGlobalObject * globa
   return JSValue::encode(jsBoolean(Bun::isBuiltinModule(moduleStr)));
 }
 
+// Might be faster as a JS builtin
+JSC_DEFINE_HOST_FUNCTION(jsFunctionNodeModulePreloadModules,
+                         (JSC::JSGlobalObject * globalObject,
+                          JSC::CallFrame *callFrame)) {
+  JSC::VM &vm = globalObject->vm();
+  auto scope = DECLARE_THROW_SCOPE(vm);
+
+  JSValue requests = callFrame->argument(0);
+
+  JSArray *requestsArray = jsDynamicCast<JSArray *>(requests.asCell());
+  if (!requestsArray)
+    return JSValue::encode(jsUndefined());
+
+  auto length = requestsArray->length();
+  auto requireFn = jsCast<Zig::GlobalObject *>(globalObject)
+                       ->getDirect(vm, WebCore::clientData(vm)
+                                           ->builtinNames()
+                                           .overridableRequirePrivateName());
+
+  if (!requireFn.isCallable())
+    return JSValue::encode(jsUndefined());
+
+  JSC::CallData callData = JSC::getCallData(requireFn);
+  WTF::NakedPtr<JSC::Exception> exception;
+  for (unsigned i = 0; i < length; ++i) {
+    MarkedArgumentBuffer args;
+    args.append(requestsArray->getIndex(globalObject, i));
+    JSValue result = JSC::call(globalObject, requireFn, callData,
+                               JSC::jsUndefined(), args, exception);
+    if (exception)
+      return JSValue::encode(jsUndefined());
+  }
+}
+
 JSC_DEFINE_HOST_FUNCTION(jsFunctionWrap, (JSC::JSGlobalObject * globalObject,
                                           JSC::CallFrame *callFrame)) {
   auto &vm = globalObject->vm();
@@ -213,7 +247,20 @@ extern "C" JSC::EncodedJSValue Resolver__nodeModulePathsForJS(JSGlobalObject *, 
 JSC_DEFINE_HOST_FUNCTION(jsFunctionFindSourceMap, (JSGlobalObject * globalObject, CallFrame *callFrame)) {
   auto &vm = globalObject->vm();
   auto scope = DECLARE_THROW_SCOPE(vm);
-  throwException(globalObject, scope, createError(globalObject, "module.SourceMap is not yet implemented in Bun"_s));
+  throwException(
+      globalObject, scope,
+      createError(globalObject,
+                  "module.findSourceMap is not implemented in Bun"_s));
+  return JSValue::encode(jsUndefined());
+}
+
+JSC_DEFINE_HOST_FUNCTION(jsFunctionRegister, (JSGlobalObject * globalObject,
+                                              CallFrame *callFrame)) {
+  auto &vm = globalObject->vm();
+  auto scope = DECLARE_THROW_SCOPE(vm);
+  throwException(
+      globalObject, scope,
+      createError(globalObject, "Bun does not support Node.js loaders"_s));
   return JSValue::encode(jsUndefined());
 }
 
@@ -226,8 +273,10 @@ JSC_DEFINE_HOST_FUNCTION(jsFunctionSyncBuiltinExports,
 JSC_DEFINE_HOST_FUNCTION(jsFunctionSourceMap, (JSGlobalObject * globalObject, CallFrame *callFrame)) {
   auto &vm = globalObject->vm();
   auto scope = DECLARE_THROW_SCOPE(vm);
-  throwException(globalObject, scope,
-                 createError(globalObject, "Not implemented"_s));
+  throwException(
+      globalObject, scope,
+      createError(globalObject,
+                  "module.SourceMap is not yet implemented in Bun"_s));
   return JSValue::encode(jsUndefined());
 }
 
@@ -491,8 +540,8 @@ DEFINE_NATIVE_MODULE(NodeModule) {
     exportNames.append(name);
     exportValues.append(value);
   };
-  exportNames.reserveCapacity(16);
-  exportValues.ensureCapacity(16);
+  exportNames.reserveCapacity(17);
+  exportValues.ensureCapacity(17);
   exportNames.append(vm.propertyNames->defaultKeyword);
   exportValues.append(defaultObject);
 
@@ -501,9 +550,12 @@ DEFINE_NATIVE_MODULE(NodeModule) {
   // Module._extensions === require.extensions
   put(
     Identifier::fromString(vm, "_extensions"_s),
-    globalObject->requireFunctionUnbound()->get( globalObject, Identifier::fromString(vm, "extensions"_s))
+    globalObject->requireFunctionUnbound()->get(globalObject, Identifier::fromString(vm, "extensions"_s))
   );
 
+  put(Identifier::fromString(vm, "_pathCache"_s), JSC::constructEmptyObject(globalObject));
+
+  putNativeFn(Identifier::fromString(vm, "__resolveFilename"_s), jsFunctionResolveFileName);
   defaultObject->putDirectCustomAccessor(
     vm,
     JSC::Identifier::fromString(vm, "_resolveFilename"_s),
@@ -511,9 +563,8 @@ DEFINE_NATIVE_MODULE(NodeModule) {
     JSC::PropertyAttribute::CustomAccessor | 0
   );
 
-  putNativeFn(Identifier::fromString(vm, "__resolveFilename"_s), jsFunctionResolveFileName);
   putNativeFn(Identifier::fromString(vm, "_resolveLookupPaths"_s), jsFunctionResolveLookupPaths);
-
+  putNativeFn(Identifier::fromString(vm, "_preloadModules"_s), jsFunctionNodeModulePreloadModules);
   putNativeFn(Identifier::fromString(vm, "createRequire"_s), jsFunctionNodeModuleCreateRequire);
   putNativeFn(Identifier::fromString(vm, "paths"_s), Resolver__nodeModulePathsForJS);
   putNativeFn(Identifier::fromString(vm, "findSourceMap"_s), jsFunctionFindSourceMap);
@@ -522,7 +573,9 @@ DEFINE_NATIVE_MODULE(NodeModule) {
   putNativeFn(Identifier::fromString(vm, "isBuiltin"_s), jsFunctionIsBuiltinModule);
   putNativeFn(Identifier::fromString(vm, "_nodeModulePaths"_s), Resolver__nodeModulePathsForJS);
   putNativeFn(Identifier::fromString(vm, "wrap"_s), jsFunctionWrap);
+  putNativeFn(Identifier::fromString(vm, "_debug"_s), jsFunctionDebugNoop);
 
+  put(Identifier::fromString(vm, "_load"_s), JSFunction::create(vm, moduleModuleLoadCodeGenerator(vm), globalObject));
   put(Identifier::fromString(vm, "_cache"_s), jsCast<Zig::GlobalObject *>(globalObject)->lazyRequireCacheObject());
   put(Identifier::fromString(vm, "globalPaths"_s), constructEmptyArray(globalObject, nullptr, 0));
 

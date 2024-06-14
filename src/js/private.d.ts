@@ -150,7 +150,7 @@ declare interface Error {
 }
 
 interface CommonJSModuleRecord {
-  $require(id: string, mod: any, args_count: number, args: Array): any;
+  $require(this: CommonJSModuleRecord, id: string, parent: string | undefined): any;
   children: CommonJSModuleRecord[];
   exports: any;
   id: string;
