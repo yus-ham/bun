@@ -254,24 +254,24 @@ pub fn build(b: *Build) !void {
             const sha_buildoption = b.option([]const u8, "sha", "Force the git sha");
             const sha_github = b.graph.environ_map.get("GITHUB_SHA");
             const sha_env = b.graph.environ_map.get("GIT_SHA");
-            const sha = sha_buildoption orelse sha_github orelse sha_env orelse fetch_sha: {
-                const result = std.process.Child.run(.{
-                    .allocator = b.allocator,
-                    .argv = &.{
-                        "git",
-                        "rev-parse",
-                        "HEAD",
-                    },
-                    .cwd = b.pathFromRoot("."),
-                    .expand_arg0 = .expand,
-                }) catch |err| {
-                    std.log.warn("Failed to execute 'git rev-parse HEAD': {s}", .{@errorName(err)});
-                    std.log.warn("Falling back to zero sha", .{});
-                    break :sha zero_sha;
-                };
-
-                break :fetch_sha b.dupe(std.mem.trim(u8, result.stdout, "\n \t"));
-            };
+            // const sha = sha_buildoption orelse sha_github orelse sha_env orelse fetch_sha: {
+            //     const result = std.process.Child.run(.{
+            //         .allocator = b.allocator,
+            //         .argv = &.{
+            //             "git",
+            //             "rev-parse",
+            //             "HEAD",
+            //         },
+            //         .cwd = b.pathFromRoot("."),
+            //         .expand_arg0 = .expand,
+            //     }) catch |err| {
+            //         std.log.warn("Failed to execute 'git rev-parse HEAD': {s}", .{@errorName(err)});
+            //         std.log.warn("Falling back to zero sha", .{});
+            //         break :sha zero_sha;
+            //     };
+            //     break :fetch_sha b.dupe(std.mem.trim(u8, result.stdout, "\n \t"));
+            // };
+            const sha = sha_buildoption orelse sha_github orelse sha_env orelse zero_sha;
 
             if (sha.len == 0) {
                 std.log.warn("No git sha found, falling back to zero sha", .{});
