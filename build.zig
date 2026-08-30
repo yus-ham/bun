@@ -665,7 +665,7 @@ pub fn build(b: *Build) !void {
         });
 
         const run_gen = b.addRunArtifact(gen_exe);
-        const gen_output = run_gen.captureStdOut();
+        const gen_output = run_gen.captureStdOut(.{});
 
         const install = b.addInstallFile(gen_output, "../src/string/immutable/grapheme_tables.zig");
         step.dependOn(&install.step);
