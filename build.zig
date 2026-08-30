@@ -252,8 +252,8 @@ pub fn build(b: *Build) !void {
         ),
         .sha = sha: {
             const sha_buildoption = b.option([]const u8, "sha", "Force the git sha");
-            const sha_github = b.graph.env_map.get("GITHUB_SHA");
-            const sha_env = b.graph.env_map.get("GIT_SHA");
+            const sha_github = b.graph.environ_map.get("GITHUB_SHA");
+            const sha_env = b.graph.environ_map.get("GIT_SHA");
             const sha = sha_buildoption orelse sha_github orelse sha_env orelse fetch_sha: {
                 const result = std.process.Child.run(.{
                     .allocator = b.allocator,
@@ -832,7 +832,7 @@ pub fn addBunObject(b: *Build, opts: *BunBuildOptions) *Compile {
 }
 
 fn enableFastBuild(b: *Build) bool {
-    const val = b.graph.env_map.get("BUN_BUILD_FAST") orelse return false;
+    const val = b.graph.environ_map.get("BUN_BUILD_FAST") orelse return false;
     return std.mem.eql(u8, val, "1");
 }
 
