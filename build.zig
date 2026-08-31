@@ -863,7 +863,7 @@ fn configureObj(b: *Build, opts: *BunBuildOptions, obj: *Compile) void {
     if (@hasField(std.meta.Child(@TypeOf(obj)), "llvm_no_merge_shards"))
         obj.llvm_no_merge_shards = obj.kind == .obj and (opts.llvm_codegen_threads orelse 0) > 1;
 
-    obj.no_link_obj = opts.os != .windows and !opts.no_llvm;
+    // obj.no_link_obj = opts.os != .windows and !opts.no_llvm;
 
     if (opts.enable_asan and !enableFastBuild(b)) {
         if (@hasField(Build.Module, "sanitize_address")) {
